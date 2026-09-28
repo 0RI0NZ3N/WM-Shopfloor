@@ -596,23 +596,11 @@ async function saveRecv(print){
   toast('Received ' + r.code + (r.jobNo && !S.jobs.some(j => Model.sameJob(r.jobNo, j.jobNo)) ? ' — job ' + r.jobNo + ' not imported yet; it will attach when it is' : ''));
   if(print) printLabel(r);
 }
-async function printLabel(r){
-  try{
-    toast('Sending label to printer…');
-    await Zebra.print(r, S.set.label);
-    r.labelPrinted = true; await saveReceipt(r); toast('Label printed — ' + r.code);
-    if(S.view.name === 'recv') render();
-  }catch(e){
-    if(e && e.name === 'NotFoundError') return toast('No printer chosen.', true);
-    const ok = await confirmSheet('Bluetooth print failed', esc(e.message || e) + '<br><br>Print the label through the browser print dialog instead?', 'Print (browser)');
-    if(ok) browserLabel(r);
-  }
-}
-function browserLabel(r){
+function printLabel(r){
   const p = $('#print');
   p.className = 'label';
   p.innerHTML = '<style>@page{size:' + (+S.set.label.w || 2) + 'in ' + (+S.set.label.h || 1) + 'in;margin:0}</style>' + Zebra.labelHtml(r, S.set.label);
-  setTimeout(() => { window.print(); r.labelPrinted = true; saveReceipt(r); }, 50);
+  setTimeout(() => { window.print(); r.labelPrinted = true; saveReceipt(r); if(S.view.name === 'recv') render(); }, 50);
 }
 function editRec(r){
   const ms = (r.matches || []).map(m => lineRef(m.listId, m.lineId)).filter(x => x.line);
@@ -630,14 +618,13 @@ function editRec(r){
     (ms.length ? '<p class="small"><b>Matched to:</b> ' + ms.map(x => esc(x.list.groupKey) + ' #' + esc(x.line.n) + ' ' + esc(x.line.p)).join(', ') + '</p>' : '') +
     '<div class="row" style="margin-top:12px"><button class="btn danger" data-e="del">Delete</button><span class="sp"></span>' +
     (j ? '<button class="btn" data-e="match">Match to line</button>' : '') +
-    '<button class="btn" data-e="label">Print label</button><button class="btn" data-e="blabel">Label (browser)</button><button class="btn dark" data-e="save">Save</button></div>');
+    '<button class="btn" data-e="label">Print label</button><button class="btn dark" data-e="save">Save</button></div>');
   $('#sheet').onclick = async e => {
     const b = e.target.closest('[data-e]'); if(!b) return;
     const act = b.dataset.e;
     const collect = () => document.querySelectorAll('#erf [data-rf]').forEach(i => r[i.dataset.rf] = i.dataset.rf === 'jobNo' || i.dataset.rf === 'bin' ? i.value.trim().toUpperCase() : i.value.trim());
     if(act === 'save'){ collect(); await saveReceipt(r); closeSheet(); render(); toast('Saved'); }
     else if(act === 'label'){ collect(); await saveReceipt(r); closeSheet(); printLabel(r); }
-    else if(act === 'blabel'){ collect(); await saveReceipt(r); closeSheet(); browserLabel(r); }
     else if(act === 'match'){ collect(); await saveReceipt(r); matchFromReceipt(r, j); }
     else if(act === 'del'){
       closeSheet();
@@ -901,9 +888,8 @@ function viewSettings(){
     '<div class="card"><h2>PIN</h2><p class="muted small">Needed to edit part # / qty / description, delete jobs, lists and received items, and restore backups. ' + (S.set.pin ? 'A PIN is set.' : 'No PIN set.') + '</p>' +
     '<div class="row"><input class="search" id="pinNew" inputmode="numeric" placeholder="New PIN (4+ digits)" style="min-width:160px"><button class="btn" data-act="pinSet">' + (S.set.pin ? 'Change' : 'Set') + ' PIN</button>' + (S.set.pin ? '<button class="btn danger" data-act="pinClear">Remove</button>' : '') + '</div></div>' +
     '<div class="card"><h2>Receiving labels</h2><div class="form"><div class="two"><label>Width (in)<input id="lw" value="' + esc(L.w) + '"></label><label>Height (in)<input id="lh" value="' + esc(L.h) + '"></label></div>' +
-    '<label>Printer DPI<select id="ldpi"><option' + (+L.dpi === 203 ? ' selected' : '') + '>203</option><option' + (+L.dpi === 300 ? ' selected' : '') + '>300</option></select></label>' +
-    '<div class="row"><button class="btn" data-act="labelSave">Save</button><button class="btn" data-act="labelTest">Test print (Bluetooth)</button></div>' +
-    '<p class="muted small">Zebra ZD621 over Bluetooth LE from Chrome on Android. The label carries a QR code with the item record (code, job, description, qty, bin, PO).</p></div></div>' +
+    '<div class="row"><button class="btn" data-act="labelSave">Save</button><button class="btn" data-act="labelTest">Test print</button></div>' +
+    '<p class="muted small">Print label opens the standard Android print dialog — pick any printer on the tablet, or save as PDF. The label carries a QR code with the item record (code, job, description, qty, bin, PO).</p></div></div>' +
     '<div class="card"><h2>Backup</h2><p class="muted small">Everything lives on this tablet. Export a backup file regularly and keep it on the network drive.' + (S.persisted === false ? ' <b>Storage is not marked persistent on this browser — back up often.</b>' : '') + '</p>' +
     '<div class="row"><button class="btn dark" data-act="backupExport">Export backup</button><button class="btn" data-act="backupImport">Restore / merge backup</button></div>' +
     '<p class="small muted" style="margin-top:8px">' + S.jobs.length + ' jobs · ' + S.lists.length + ' lists · ' + S.receipts.length + ' received items</p></div>' +
@@ -1318,20 +1304,9 @@ function fieldSpool(id){
     }
   };
 }
-async function printSpoolLabel(sp){
+function printSpoolLabel(sp){
   const stub = { code: sp.tag, type: sp.jobNo ? 'job' : 'stock', jobNo: sp.jobNo || '', description: sp.material + ' — ' + fmtFt(sp.remainingFt),
     qty: fmtFt(sp.remainingFt), uom: '', bin: '', po: sp.po || '', supplier: sp.supplier || '', receivedAt: sp.createdAt };
-  try{
-    toast('Sending label to printer…');
-    await Zebra.print(stub, S.set.label);
-    sp.labelPrinted = true; await saveSpool(sp); toast('Label printed — ' + sp.tag);
-  }catch(e){
-    if(e && e.name === 'NotFoundError') return toast('No printer chosen.', true);
-    const ok = await confirmSheet('Bluetooth print failed', esc(e.message || e) + '<br><br>Print the label through the browser print dialog instead?', 'Print (browser)');
-    if(ok) browserSpoolLabel(sp, stub);
-  }
-}
-function browserSpoolLabel(sp, stub){
   const p = $('#print');
   p.className = 'label';
   p.innerHTML = '<style>@page{size:' + (+S.set.label.w || 2) + 'in ' + (+S.set.label.h || 1) + 'in;margin:0}</style>' + Zebra.labelHtml(stub, S.set.label);
@@ -1443,7 +1418,7 @@ const A = {
     S.set.pin = v; saveSet('pin'); render(); toast('PIN set');
   },
   pinClear: async () => { if(!(await askPin('Remove the PIN'))) return; S.set.pin = ''; saveSet('pin'); render(); },
-  labelSave: () => { S.set.label = { w: +$('#lw').value || 2, h: +$('#lh').value || 1, dpi: +$('#ldpi').value || 203 }; saveSet('label'); toast('Saved'); },
+  labelSave: () => { S.set.label = { w: +$('#lw').value || 2, h: +$('#lh').value || 1 }; saveSet('label'); toast('Saved'); },
   labelTest: () => printLabel({ code: 'TEST0001', type: 'job', jobNo: 'MEII-0000', description: 'TEST LABEL', qty: '1', uom: 'EA', bin: 'RECEIVING', receivedAt: nowIso() }),
   backupExport: () => backupExport(),
   backupImport: () => { $('#fileBackup').value = ''; $('#fileBackup').click(); },
