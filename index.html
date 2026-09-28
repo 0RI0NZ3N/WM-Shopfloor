@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1d2327">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>MEII Shop Floor</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/favicon.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand" data-act="goDash"><img src="icons/logo-light.png" alt="Modern Elevator"><span class="app">Shop Floor</span></div>
+  <nav class="tabs" id="tabs"></nav>
+  <button class="btn primary" data-act="importList">+ Import product list</button>
+</header>
+<main id="main"></main>
+
+<div id="drawer" class="drawer" hidden></div>
+<div id="sheetWrap" class="sheetwrap" hidden><div id="sheet" class="sheet"></div></div>
+<div id="toast" class="toast" hidden></div>
+<div id="print"></div>
+
+<input type="file" id="fileList" accept="application/pdf,.pdf,image/*" multiple hidden>
+<input type="file" id="fileMove" accept=".json,.csv,application/json,text/csv" hidden>
+<input type="file" id="fileBackup" accept=".json,application/json" hidden>
+<input type="file" id="filePhoto" accept="image/*" capture="environment" hidden>
+
+<script src="vendor/qrcode.js"></script>
+<script src="db.js"></script>
+<script src="ocr.js"></script>
+<script src="parse.js"></script>
+<script src="pdfexport.js"></script>
+<script src="zebra.js"></script>
+<script src="app.js"></script>
+<script>
+  if('serviceWorker' in navigator && location.protocol !== 'file:'){
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+</script>
+</body>
+</html>
