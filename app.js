@@ -2,6 +2,11 @@
    material matching, dashboard and reports. Local-first: everything lives on
    the tablet (IndexedDB); Backup exports a JSON file. */
 
+// Bump this together with VERSION in sw.js on every deploy. Shown in the
+// header so it's visible at a glance whether a tablet has picked up the
+// latest push, without digging into browser dev tools.
+const APP_VERSION = 'v7';
+
 /* ================= model helpers ================= */
 const Model = (() => {
   const DEPTS = [['laser', 'Laser'], ['weld', 'Weld'], ['brake', 'Brake Press'], ['paint', 'Paint'], ['assy', 'Assembly']];
@@ -1482,6 +1487,7 @@ $('#filePhoto').addEventListener('change', async e => {
 // (Android Chrome fires afterprint before the print preview has rendered, which would print a blank page).
 
 (async () => {
+  const verEl = $('#appVersion'); if(verEl) verEl.textContent = APP_VERSION;
   await load();
   S.set.label = Object.assign({ w: 2, h: 1, dpi: 203 }, S.set.label);
   render();

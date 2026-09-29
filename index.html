@@ -14,7 +14,7 @@
 </head>
 <body>
 <header class="top">
-  <div class="brand" data-act="goDash"><img src="icons/logo-light.png" alt="Modern Elevator"><span class="app">Shop Floor</span></div>
+  <div class="brand" data-act="goDash"><img src="icons/logo-light.png" alt="Modern Elevator"><span class="app">Shop Floor</span><span class="ver" id="appVersion" title="Build version — confirms this tablet has the latest push"></span></div>
   <nav class="tabs" id="tabs"></nav>
   <button class="btn primary" data-act="importList">+ Import product list</button>
 </header>
@@ -38,7 +38,27 @@
 <script src="zebra.js"></script>
 <script src="app.js"></script>
 <script>
+  // sw.js calls skipWaiting() + clients.claim() on every deploy, so a newer
+  // service worker takes over as soon as it's installed — this makes sure
+  // the open page actually reloads onto it instead of carrying on with the
+  // old cached app.js in memory. Combined with the version number in the
+  // header, reopening the app after a push always lands on the new build.
   if('serviceWorker' in navigator && location.protocol !== 'file:'){
+    // Only reload on a LATER controllerchange, not the very first one — a
+    // page's first-ever visit also fires this event once the fresh service
+    // worker claims it, which isn't an update and would otherwise cause an
+    // unwanted extra reload on first install. navigator.serviceWorker.controller
+    // being already set here means this page was already under an older
+    // worker's control, so a controllerchange from here on really is a
+    // newer version taking over.
+    let armed = !!navigator.serviceWorker.controller;
+    let reloadedForUpdate = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if(!armed){ armed = true; return; }
+      if(reloadedForUpdate) return;
+      reloadedForUpdate = true;
+      window.location.reload();
+    });
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
 </script>

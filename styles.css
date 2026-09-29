@@ -23,6 +23,7 @@ input,select,textarea{font:inherit;color:inherit}
 .brand{cursor:pointer}
 .brand img{height:36px;width:auto;display:block}
 .brand .app{font-size:12px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#cfd6db;border-left:1px solid #4a535a;padding-left:9px}
+.brand .ver{font-size:10px;font-weight:600;color:#7a848c;margin-left:2px}
 @media (max-width:700px){.brand img{height:20px}.brand .app{display:none}}
 .pr-logo{height:28px;width:auto;margin-right:10px;vertical-align:middle}
 .tabs{flex:1;display:flex;gap:4px;overflow-x:auto;scrollbar-width:none;min-width:0}
