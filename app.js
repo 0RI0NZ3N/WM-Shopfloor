@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v9';
+const APP_VERSION = 'v10';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -549,7 +549,7 @@ function viewRecv(){
   const d = S.ui.lastRecv;
   const t = S.ui.recvType;
   let h = '<div class="row" style="margin-bottom:12px"><h1>Receiving</h1><span class="sp"></span>' +
-    ('BarcodeDetector' in window ? '<button class="btn" data-act="scanLabel">Scan label</button>' : '') +
+    '<button class="btn" data-act="scanLabel">Scan label</button>' +
     '<button class="btn" data-act="importMove" title="Accepts the move app\'s JSON/CSV export, or its Print / Save PDF list export">Import move app file</button></div><div class="recvgrid">';
   h += '<div class="card"><h2>Receive material</h2><div class="form" style="margin-top:10px" id="recvForm">' +
     '<div class="seg"><button data-act="recvType" data-k="job" class="' + (t === 'job' ? 'on' : '') + '">For a job</button><button data-act="recvType" data-k="stock" class="' + (t === 'stock' ? 'on' : '') + '">Stock</button></div>' +
@@ -619,8 +619,10 @@ function editRec(r){
     '<div class="two"><label>Supplier<input data-rf="supplier" value="' + esc(r.supplier || '') + '"></label><label>PO #<input data-rf="po" value="' + esc(r.po || '') + '"></label></div>' +
     '<div class="two"><label>Packing slip #<input data-rf="slip" value="' + esc(r.slip || '') + '"></label><label>Location / bin<input data-rf="bin" list="dlBins2" value="' + esc(r.bin || '') + '"></label></div><datalist id="dlBins2">' + binOptions() + '</datalist>' +
     '<label>Notes<textarea data-rf="note">' + esc(r.note || '') + '</textarea></label></div>' +
+    (r.type === 'stock' ? '<p class="small"><b>Job:</b> ' + (r.allocatedJob ? esc(r.allocatedJob) : '<span class="muted">not associated yet</span>') + '</p>' : '') +
     (ms.length ? '<p class="small"><b>Matched to:</b> ' + ms.map(x => esc(x.list.groupKey) + ' #' + esc(x.line.n) + ' ' + esc(x.line.p)).join(', ') + '</p>' : '') +
     '<div class="row" style="margin-top:12px"><button class="btn danger" data-e="del">Delete</button><span class="sp"></span>' +
+    (r.type === 'stock' ? '<button class="btn" data-e="assign">' + (r.allocatedJob ? 'Change job' : 'Associate with job') + '</button>' : '') +
     (j ? '<button class="btn" data-e="match">Match to line</button>' : '') +
     '<button class="btn" data-e="label">Print label</button><button class="btn dark" data-e="save">Save</button></div>');
   $('#sheet').onclick = async e => {
@@ -630,12 +632,38 @@ function editRec(r){
     if(act === 'save'){ collect(); await saveReceipt(r); closeSheet(); render(); toast('Saved'); }
     else if(act === 'label'){ collect(); await saveReceipt(r); closeSheet(); printLabel(r); }
     else if(act === 'match'){ collect(); await saveReceipt(r); matchFromReceipt(r, j); }
+    else if(act === 'assign'){ collect(); await saveReceipt(r); pickJobForStock(r); }
     else if(act === 'del'){
       closeSheet();
       if(!(await askPin('Delete received item ' + r.code))) return;
       if(!(await confirmSheet('Delete ' + r.code + '?', 'This removes the receipt and any line matches.', 'Delete', true))) return;
       S.receipts = S.receipts.filter(x => x !== r); await DB.del('receipts', r.id); render(); toast('Deleted');
     }
+  };
+}
+// Scan-to-associate: a stock item received before its job was known (or one
+// that just needs re-assigning) gets tied to a job here, straight from a
+// scanned label - no need to go find it from the job's own dashboard.
+function pickJobForStock(r){
+  const draw = q => {
+    const Q = q.trim().toUpperCase();
+    const list = S.jobs.filter(j => !Q || (j.jobNo + ' ' + (j.jobName || '')).toUpperCase().includes(Q));
+    $('#pjlist').innerHTML = list.map(j => '<button class="opt" data-j="' + esc(j.jobNo) + '"><span><b class="mono">' + esc(j.jobNo) + '</b>' + (j.jobName ? '<br><span class="small">' + esc(j.jobName) + '</span>' : '') + '</span></button>').join('') || '<p class="muted">No jobs imported yet.</p>';
+  };
+  openSheet('<h2>Associate with a job</h2><div class="muted"><span class="mono">' + esc(r.code) + '</span> · ' + esc(r.description) + ' · ' + esc(r.qty) + ' ' + esc(r.uom || 'EA') + '</div>' +
+    '<input class="search" style="width:100%;margin-top:8px" placeholder="Filter by job #" id="pjq"><div class="opts" id="pjlist"></div>' +
+    '<div class="row" style="margin-top:10px"><span class="sp"></span><button class="btn" data-j="__x">Cancel</button></div>');
+  draw('');
+  $('#pjq').oninput = e => draw(e.target.value);
+  $('#sheet').onclick = async e => {
+    const b = e.target.closest('[data-j]'); if(!b) return;
+    if(b.dataset.j === '__x') return closeSheet();
+    r.allocatedJob = b.dataset.j;
+    await saveReceipt(r);
+    closeSheet();
+    toast('Associated with ' + r.allocatedJob);
+    const j = S.jobs.find(x => Model.sameJob(x.jobNo, r.allocatedJob));
+    if(j && listsOf(j.id).length) matchFromReceipt(r, j); else render();
   };
 }
 function stockForJob(j){
@@ -663,23 +691,32 @@ async function scanLabel(){
   catch(e){ return toast('Camera not available: ' + e.message, true); }
   openSheet('<h2>Scan a receiving label</h2><video id="scanv" playsinline muted style="width:100%;max-height:60vh;background:#000;border-radius:8px"></video><div class="row" style="margin-top:10px"><span class="sp"></span><button class="btn" data-s="x">Cancel</button></div>');
   const v = $('#scanv'); v.srcObject = stream; await v.play();
-  const det = new BarcodeDetector({ formats: ['qr_code', 'code_128'] });
+  // Decoded with jsQR (pure JS, works in any browser) rather than the native
+  // BarcodeDetector API, which Samsung Internet and most non-desktop-Chrome
+  // browsers don't implement — that API silently doing nothing was why
+  // scanning never worked on the shop tablets.
+  const c = document.createElement('canvas');
+  const ctx = c.getContext('2d', { willReadFrequently: true });
   let live = true;
-  const stop = () => { live = false; stream.getTracks().forEach(t => t.stop()); };
+  const stream_ = stream;
+  const stop = () => { live = false; stream_.getTracks().forEach(t => t.stop()); };
   $('#sheet').onclick = e => { if(e.target.closest('[data-s]')){ stop(); closeSheet(); } };
   while(live){
-    try{
-      const codes = await det.detect(v);
-      if(codes.length){
-        const raw = codes[0].rawValue;
-        let c = raw; try{ c = JSON.parse(raw).c || raw; }catch(e){}
-        const r = S.receipts.find(x => x.code === c || x.moveCode === c);
+    if(v.videoWidth){
+      c.width = v.videoWidth; c.height = v.videoHeight;
+      ctx.drawImage(v, 0, 0, c.width, c.height);
+      let code = null;
+      try{ code = jsQR(ctx.getImageData(0, 0, c.width, c.height).data, c.width, c.height); }catch(e){}
+      if(code && code.data){
+        const raw = code.data;
+        let cd = raw; try{ cd = JSON.parse(raw).c || raw; }catch(e){}
+        const r = S.receipts.find(x => x.code === cd || x.moveCode === cd);
         stop(); closeSheet();
-        if(r) editRec(r); else toast('Label ' + c + ' is not in this tablet’s receiving log', true);
+        if(r) editRec(r); else toast('Label ' + cd + ' is not in this tablet’s receiving log', true);
         return;
       }
-    }catch(e){}
-    await new Promise(r => setTimeout(r, 250));
+    }
+    await new Promise(res => setTimeout(res, 180));
   }
 }
 
