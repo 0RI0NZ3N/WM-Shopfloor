@@ -239,7 +239,6 @@ function viewDash(){
   const pkgOld = pkgRows.reduce((a, { p }) => a + (pkgType(p.type).era === 'old' ? (+p.qty || 0) : 0), 0);
   let h = '<div class="row"><h1>Jobs</h1><span class="sp"></span>' +
     '<input class="search" placeholder="Search job #, name, customer" value="' + esc(S.ui.dashQ) + '" data-in="dashQ">' +
-    '<button class="btn" data-act="freightSplit">Freight split</button>' +
     '<button class="btn" data-act="printPackaging">Packaging report</button>' +
     '<button class="btn" data-act="printAll" data-detail="0">Print summary</button>' +
     '<button class="btn" data-act="printAll" data-detail="1">Print full report</button>' +
