@@ -156,12 +156,19 @@ const MoveParse = (() => {
     return rows;
   }
 
-  // "09/25/2026 08:15" (as printed by the move app's own fmtDate) -> ISO
+  // "09/25/2026 08:15" (as printed by the move app's own fmtDate, fixed to
+  // en-US / MM/DD/YYYY) -> ISO. If either number is >12 the order is
+  // unambiguous regardless of source, so use that as a safety net in case a
+  // PDF was ever produced under a different locale/format.
   function toIso(captured){
     const m = String(captured || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})$/);
     if(!m) return null;
-    const [, mo, d, y, h, mi] = m;
-    const dt = new Date(+y, +mo - 1, +d, +h, +mi);
+    let [, a, b, y, h, mi] = m;
+    a = +a; b = +b;
+    let mo, d;
+    if(a > 12 && b <= 12){ d = a; mo = b; }       // must be DD/MM
+    else { mo = a; d = b; }                        // MM/DD (default/expected)
+    const dt = new Date(+y, mo - 1, d, +h, +mi);
     return isNaN(dt) ? null : dt.toISOString();
   }
 

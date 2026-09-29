@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v8';
+const APP_VERSION = 'v9';
 
 /* ================= model helpers ================= */
 const Model = (() => {
