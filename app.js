@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v7';
+const APP_VERSION = 'v8';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -550,7 +550,7 @@ function viewRecv(){
   const t = S.ui.recvType;
   let h = '<div class="row" style="margin-bottom:12px"><h1>Receiving</h1><span class="sp"></span>' +
     ('BarcodeDetector' in window ? '<button class="btn" data-act="scanLabel">Scan label</button>' : '') +
-    '<button class="btn" data-act="importMove">Import move app file</button></div><div class="recvgrid">';
+    '<button class="btn" data-act="importMove" title="Accepts the move app\'s JSON/CSV export, or its Print / Save PDF list export">Import move app file</button></div><div class="recvgrid">';
   h += '<div class="card"><h2>Receive material</h2><div class="form" style="margin-top:10px" id="recvForm">' +
     '<div class="seg"><button data-act="recvType" data-k="job" class="' + (t === 'job' ? 'on' : '') + '">For a job</button><button data-act="recvType" data-k="stock" class="' + (t === 'stock' ? 'on' : '') + '">Stock</button></div>' +
     (t === 'job' ? '<label>Job #<input id="recvJob" list="dlJobs" autocomplete="off" value="' + esc(d.jobNo || '') + '" placeholder="MEII-3181"></label><datalist id="dlJobs">' + S.jobs.map(j => '<option value="' + esc(j.jobNo) + '">' + esc(j.jobName) + '</option>').join('') + '</datalist>' : '') +
@@ -711,11 +711,34 @@ function findRecords(o){
   walk(o, 0);
   return best || [];
 }
+// Simple deterministic string hash (djb2) - used to make a stable receipt id
+// for PDF-sourced rows, which carry no item_id of their own, so re-importing
+// the same PDF twice skips the items already brought in instead of
+// duplicating them.
+function djb2(s){
+  let h = 5381;
+  for(let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
 async function importMove(file){
-  const text = await file.text();
+  const isPdf = /\.pdf$/i.test(file.name) || file.type === 'application/pdf';
   let recs;
-  try{ recs = /\.csv$/i.test(file.name) ? parseCsv(text) : findRecords(JSON.parse(text)); }
-  catch(e){ return toast('Could not read that file: ' + e.message, true); }
+  if(isPdf){
+    try{
+      const rows = await MoveParse.parse(new Uint8Array(await file.arrayBuffer()));
+      recs = rows.map(r => ({
+        item_id: 'pdf-' + djb2([r.jobNo, r.type, r.description, r.qty, r.bin, r.capturedIso, r.status].join('|')),
+        capture_type: r.type, job_number: r.jobNo, description: r.group ? '[' + r.group + '] ' + r.description : r.description,
+        qty: r.qty, box_count: r.boxes, destination_bin: r.bin, captured_by: r.by,
+        captured_at: r.capturedIso || nowIso(), status: r.status
+      }));
+      if(!recs.length) return toast('No items found in that PDF - is it a move app "Print / Save PDF list" export?', true);
+    }catch(e){ return toast('Could not read that PDF: ' + (e.message || e), true); }
+  }else{
+    const text = await file.text();
+    try{ recs = /\.csv$/i.test(file.name) ? parseCsv(text) : findRecords(JSON.parse(text)); }
+    catch(e){ return toast('Could not read that file: ' + e.message, true); }
+  }
   const pick = (o, ...ks) => { for(const k of ks){ const hit = Object.keys(o).find(x => x.toLowerCase().replace(/[\s-]/g, '_') === k); if(hit && o[hit] != null && o[hit] !== '') return o[hit]; } return ''; };
   let added = 0, skipped = 0;
   const batch = [];
