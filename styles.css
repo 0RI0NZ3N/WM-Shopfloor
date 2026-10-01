@@ -68,6 +68,7 @@ button.stat:active{border-color:var(--ink)}
 .stat b{display:block;font:700 26px/1.1 ui-monospace,"Roboto Mono",monospace}
 .stat span{font-size:12px;color:var(--mute);text-transform:uppercase;letter-spacing:.06em}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+.dashgroup{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);margin:16px 0 8px}
 .jcard{background:var(--card);border:1px solid var(--hair);border-radius:12px;padding:14px;cursor:pointer;display:flex;flex-direction:column;gap:9px;position:relative}
 .jcard:active{border-color:var(--ink)}
 .jcard .rank{position:absolute;top:12px;right:14px;font:700 12px ui-monospace,monospace;color:var(--mute)}

@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v10';
+const APP_VERSION = 'v11';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -52,9 +52,10 @@ window.Model = Model;
 /* ================= state ================= */
 const S = {
   jobs: [], lists: [], receipts: [], spools: [],
-  set: { staff: ['M.I', 'Y.S', 'N.P', 'Z.M'], pin: '', openTabs: [], label: { w: 2, h: 1, dpi: 203 }, bins: [] },
+  set: { staff: ['M.I', 'Y.S', 'N.P', 'Z.M'], pin: '', openTabs: [], label: { w: 2, h: 1, dpi: 203 }, bins: [],
+    shipFrom: ['1149 Pioneer Rd, Burlington, ON', '3230 Mainway, Burlington, ON'] },
   view: { name: 'dash' },
-  ui: { dashFilter: 'active', dashQ: '', listFilter: {}, recvFilter: 'all', recvQ: '', editLines: {}, recvType: 'job', draftPhoto: null, lastRecv: {}, spoolQ: '', spoolFilter: 'all' }
+  ui: { dashFilter: 'active', dashSort: 'ship', dashQ: '', listFilter: {}, recvFilter: 'all', recvQ: '', editLines: {}, recvType: 'job', draftPhoto: null, lastRecv: {}, spoolQ: '', spoolFilter: 'all' }
 };
 /* ---- spool / reel length units ---- */
 const SPOOL_UNITS = [['ft', 'ft'], ['in', 'in'], ['yd', 'yd'], ['m', 'm'], ['cm', 'cm']];
@@ -132,6 +133,59 @@ function jobStats(j){
   return s;
 }
 const gColor = g => 'var(--g-' + g + ')', gInk = g => 'var(--g-' + g + '-ink)';
+
+/* ---- ship date (lives per product list - each car/list can ship separately) ---- */
+// The PDF header's own "SHIP DATE:" field is usually blank on the ERP form
+// (filled in here once scheduling is known), but normalize it if present so
+// it can seed the <input type="date">; anything unparseable is dropped
+// rather than breaking the date picker.
+function normalizeDateStr(s){
+  s = String(s || '').trim();
+  if(!s) return '';
+  if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const m = s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/);
+  if(m){
+    let [, mo, d, y] = m;
+    if(y.length === 2) y = (+y < 70 ? '20' : '19') + y;
+    const dt = new Date(+y, +mo - 1, +d);
+    if(!isNaN(dt)) return y + '-' + String(+mo).padStart(2, '0') + '-' + String(+d).padStart(2, '0');
+  }
+  return '';
+}
+function jobNextShip(j){
+  const ds = listsOf(j.id).map(l => l.shipDate).filter(Boolean).sort();
+  return ds[0] || null;
+}
+function fmtDateLong(iso){
+  if(!iso) return '';
+  const d = new Date(iso + 'T00:00:00');
+  return isNaN(d) ? iso : d.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+}
+function shipBadge(dateStr){
+  if(!dateStr) return '';
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const d = new Date(dateStr + 'T00:00:00');
+  if(isNaN(d)) return '';
+  const days = Math.round((d - today) / 86400000);
+  const cls = days <= 2 ? 'red' : days <= 7 ? 'warn' : '';
+  const txt = days < 0 ? 'Overdue ' + (-days) + 'd' : days === 0 ? 'Ships today' : days === 1 ? 'Ships tomorrow' : 'Ships in ' + days + 'd';
+  return '<span class="tag' + (cls ? ' ' + cls : '') + '">' + txt + '</span>';
+}
+// Shared by the dashboard and the print summary so both sort/group jobs the
+// same way. 'ship' mode: jobs with an upcoming ship date first (earliest
+// first), everything with no ship date set on any of its lists grouped
+// separately as "unscheduled". 'pct' mode: the original closest-to-complete
+// sort, no grouping.
+function sortedJobRows(jobs){
+  const oldSort = (a, b) => b.s.pct - a.s.pct || (b.s.done - a.s.done) || (b.s.last || '').localeCompare(a.s.last || '');
+  const rows = jobs.map(j => ({ j, s: jobStats(j), ship: jobNextShip(j) }));
+  if(S.ui.dashSort === 'ship'){
+    const scheduled = rows.filter(r => r.ship).sort((a, b) => a.ship.localeCompare(b.ship) || oldSort(a, b));
+    const unscheduled = rows.filter(r => !r.ship).sort(oldSort);
+    return { scheduled, unscheduled };
+  }
+  return { scheduled: rows.slice().sort(oldSort), unscheduled: [] };
+}
 
 /* ---- crate/skid standardization log ---- */
 const PKG_TYPES = [
@@ -235,7 +289,7 @@ function viewDash(){
   const q = S.ui.dashQ.trim().toUpperCase();
   let jobs = S.jobs.filter(j => S.ui.dashFilter === 'all' || (S.ui.dashFilter === 'closed' ? j.status === 'closed' : j.status !== 'closed'));
   if(q) jobs = jobs.filter(j => (j.jobNo + ' ' + j.jobName + ' ' + j.customer).toUpperCase().includes(q));
-  const rows = jobs.map(j => ({ j, s: jobStats(j) })).sort((a, b) => b.s.pct - a.s.pct || (b.s.done - a.s.done) || (b.s.last || '').localeCompare(a.s.last || ''));
+  const { scheduled, unscheduled } = sortedJobRows(jobs);
   const active = S.jobs.filter(j => j.status !== 'closed').map(j => jobStats(j));
   const T = active.reduce((a, s) => ({ total: a.total + s.total, done: a.done + s.done, bo: a.bo + s.bo, un: a.un + s.unmatched }), { total: 0, done: 0, bo: 0, un: 0 });
   const unassigned = S.receipts.filter(r => r.type !== 'stock' && !S.jobs.some(j => Model.sameJob(r.jobNo, j.jobNo))).length;
@@ -257,20 +311,27 @@ function viewDash(){
     '<div class="stat"><b>' + (pkgNew + pkgOld ? pct(pkgNew / (pkgNew + pkgOld)) : '—') + '</b><span>Packaging on new standard</span></div></div>';
   h += '<div class="row" style="margin-bottom:10px"><div class="chips">' +
     [['active', 'Active'], ['closed', 'Closed'], ['all', 'All']].map(([k, t]) => '<button class="chip' + (S.ui.dashFilter === k ? ' on' : '') + '" data-act="dashFilter" data-k="' + k + '">' + t + '</button>').join('') +
-    '</div><span class="sp"></span><span class="legend">Sorted closest to completion. A line is done when all five departments and QC are signed and nothing is on back order.</span></div>';
-  if(!rows.length){
+    '</div><span class="sp"></span><div class="chips">' +
+    [['ship', 'Next to ship'], ['pct', 'Closest to done']].map(([k, t]) => '<button class="chip' + (S.ui.dashSort === k ? ' on' : '') + '" data-act="dashSort" data-k="' + k + '">' + t + '</button>').join('') + '</div></div>';
+  if(!scheduled.length && !unscheduled.length){
     return h + '<div class="empty card"><h2>' + (S.jobs.length ? 'No jobs match' : 'No jobs yet') + '</h2><p>Import a product list PDF to create a job tab.</p>' +
       '<button class="btn primary" data-act="importList">+ Import product list</button></div>';
   }
-  h += '<div class="grid">' + rows.map(({ j, s }, i) => {
+  const cardHtml = (j, s, i) => {
     const w = x => (s.total ? x / s.total * 100 : 0).toFixed(1) + '%';
+    const ship = jobNextShip(j);
     return '<div class="jcard" data-act="goJob" data-id="' + esc(j.id) + '"><span class="rank">#' + (i + 1) + '</span>' +
       '<div><div class="jn">' + esc(j.jobNo) + (j.status === 'closed' ? ' <span class="tag">closed</span>' : '') + '</div><div class="muted">' + esc(j.jobName || '') + (j.customer ? ' · ' + esc(j.customer) : '') + '</div></div>' +
       '<div class="row"><span class="big">' + pct(s.pct) + '</span><span class="muted small">' + s.done + ' of ' + s.total + ' lines done</span></div>' +
       '<div class="bar"><i class="d" style="width:' + w(s.done) + '"></i><i class="p" style="width:' + w(s.partial) + '"></i><i class="b" style="width:' + w(s.bo) + '"></i></div>' +
-      '<div class="lchips">' + s.lists.map(x => '<span class="lchip" style="background:' + gColor(x.list.groupKey) + ';color:' + gInk(x.list.groupKey) + '">' + esc(x.list.groupKey === 'X' ? x.list.title : x.list.groupKey) + (x.list.carNo ? ' · ' + esc(x.list.carNo) : '') + ' ' + pct(x.s.pct) + '</span>').join('') + '</div>' +
+      '<div class="lchips">' + s.lists.map(x => '<span class="lchip" style="background:' + gColor(x.list.groupKey) + ';color:' + gInk(x.list.groupKey) + '">' + esc(x.list.groupKey === 'X' ? x.list.title : x.list.groupKey) + (x.list.carNo ? ' · ' + esc(x.list.carNo) : '') + ' ' + pct(x.s.pct) + '</span>').join('') + (ship ? ' ' + shipBadge(ship) : '') + '</div>' +
       '<div class="meta"><span>B/O lines <b style="color:' + (s.bo ? 'var(--red)' : 'inherit') + '">' + s.bo + '</b></span><span>Material <b>' + s.recv + '</b>' + (s.unmatched ? ' (<b>' + s.unmatched + '</b> unmatched)' : '') + '</span><span>' + rel(s.last) + '</span></div></div>';
-  }).join('') + '</div>';
+  };
+  let i = 0;
+  if(scheduled.length) h += '<div class="grid">' + scheduled.map(({ j, s }) => cardHtml(j, s, i++)).join('') + '</div>';
+  if(unscheduled.length){
+    h += '<h3 class="dashgroup">Unscheduled</h3><div class="grid">' + unscheduled.map(({ j, s }) => cardHtml(j, s, i++)).join('') + '</div>';
+  }
   return h;
 }
 
@@ -283,7 +344,7 @@ function viewJob(){
   let h = '<div class="card jhead"><div><div class="row"><h1 class="mono">' + esc(j.jobNo) + '</h1>' + (j.status === 'closed' ? '<span class="tag">closed</span>' : '') + '</div>' +
     '<div class="kv"><span>Job name</span><b>' + esc(j.jobName || '—') + '</b><span>Customer</span><b>' + esc(j.customer || '—') + '</b>' +
     (j.shipAddr ? '<span>Ship to</span><b>' + esc(j.shipAddr).replace(/\n/g, ', ') + '</b>' : '') + '</div></div>' +
-    '<div class="jpct"><b>' + pct(s.pct) + '</b><div class="muted small">' + s.done + '/' + s.total + ' lines done · ' + s.bo + ' on B/O</div>' +
+    '<div class="jpct"><b>' + pct(s.pct) + '</b><div class="muted small">' + s.done + '/' + s.total + ' lines done · ' + s.bo + ' on B/O' + (jobNextShip(j) ? ' · next ship ' + esc(fmtDateLong(jobNextShip(j))) + ' ' + shipBadge(jobNextShip(j)) : '') + '</div>' +
     '<div class="row" style="justify-content:flex-end;margin-top:8px"><button class="btn sm" data-act="printJob">Print job report</button><button class="btn sm" data-act="jobInfo">Job info</button></div></div></div>';
   h += '<div class="subtabs">' + ls.map(l => {
     const st = Model.listStats(l);
@@ -337,6 +398,9 @@ function viewList(j, list){
     '<button class="btn sm" data-act="importList" data-job="' + esc(j.id) + '" data-list="' + list.id + '">Update from PDF</button>' +
     '<button class="btn sm" data-act="listInfo">Signatures</button>' +
     '<button class="btn sm' + (edit ? ' dark' : '') + '" data-act="editLines">' + (edit ? 'Done editing' : 'Edit lines') + '</button></div>';
+  h += '<div class="ltool"><span class="muted small">' + (list.shipDate ? 'Ship ' + esc(fmtDateLong(list.shipDate)) + ' ' + shipBadge(list.shipDate) : '<span class="tag">No ship date set</span>') +
+    (list.weightKg ? ' · ' + esc(list.weightKg) + ' kg' : '') + (list.skidCount ? ' · ' + esc(list.skidCount) + ' skids' : '') +
+    (list.bookedCarrier ? ' · booked ' + esc(list.bookedCarrier) : '') + '</span><span class="sp"></span><button class="btn sm" data-act="listShip">Shipping</button></div>';
   h += '<div class="ltool"><div class="chips" id="lchips">' + [['all', 'All', st.total], ['open', 'Open', st.total - st.done], ['bo', 'Back order', st.bo], ['done', 'Done', st.done]]
     .map(([k, t, n]) => '<button class="chip' + (f === k ? ' on' : '') + '" data-act="lfilter" data-k="' + k + '">' + t + ' <b>' + n + '</b></button>').join('') + '</div>' +
     '<span class="sp"></span><span class="muted small">Tap a part # for history, material and back-order details. Tap a box to sign.</span></div>';
@@ -922,10 +986,13 @@ async function commitImport(){
     });
     for(const o of old) if(!used.has(o)){ o.revNote = 'Not on REV ' + (h.rev || '?'); items.push(o); dropped++; }
     list.items = items;
-    Object.assign(list, { title: h.title || list.title, groupKey: Model.groupKey(h.title || list.title), carNo: h.carNo, rev: h.rev, shipDate: h.shipDate, formRev: h.formRev, printed: h.printed, importedAt: nowIso(), mode: r.mode });
+    // shipDate is scheduled here, in the app, once a date is known - the PDF's
+    // own "SHIP DATE:" field is normally blank, so re-importing/updating from
+    // a fresh PDF must never clobber a date already entered on this list.
+    Object.assign(list, { title: h.title || list.title, groupKey: Model.groupKey(h.title || list.title), carNo: h.carNo, rev: h.rev, shipDate: normalizeDateStr(h.shipDate) || list.shipDate, formRev: h.formRev, printed: h.printed, importedAt: nowIso(), mode: r.mode });
   } else {
-    list = { id: uid(), jobId: j.id, title: (h.title || 'PRODUCT LIST').toUpperCase(), groupKey: Model.groupKey(h.title), carNo: h.carNo, rev: h.rev, shipDate: h.shipDate,
-      formRev: h.formRev, printed: h.printed, orderType: {}, sig: {}, importedAt: nowIso(), mode: r.mode, items: lines.map((src, i) => newLine(src, src.n || i + 1)) };
+    list = { id: uid(), jobId: j.id, title: (h.title || 'PRODUCT LIST').toUpperCase(), groupKey: Model.groupKey(h.title), carNo: h.carNo, rev: h.rev, shipDate: normalizeDateStr(h.shipDate),
+      formRev: h.formRev, printed: h.printed, orderType: {}, sig: {}, rfqLog: [], importedAt: nowIso(), mode: r.mode, items: lines.map((src, i) => newLine(src, src.n || i + 1)) };
     list.items.forEach((ln, i) => applied += applyFilled(ln, lines[i].filled));
     S.lists.push(list);
   }
@@ -949,6 +1016,9 @@ function viewSettings(){
     '<div class="card"><h2>Staff initials</h2><p class="muted small">Shown as the tap-to-sign choices.</p><div class="chips" style="margin:8px 0">' +
     S.set.staff.map((s, i) => '<span class="chip">' + esc(s) + ' <button class="btn sm ghost" data-act="staffDel" data-i="' + i + '">✕</button></span>').join('') + '</div>' +
     '<div class="row"><input class="search" id="staffNew" placeholder="e.g. A.B" style="min-width:120px"><button class="btn" data-act="staffAdd">Add</button></div></div>' +
+    '<div class="card"><h2>Ship-from addresses</h2><p class="muted small">Offered as the pickup address when building a freight RFQ.</p><div class="chips" style="margin:8px 0">' +
+    (S.set.shipFrom || []).map((a, i) => '<span class="chip">' + esc(a) + ' <button class="btn sm ghost" data-act="shipFromDel" data-i="' + i + '">✕</button></span>').join('') + '</div>' +
+    '<div class="row"><input class="search" id="shipFromNew" placeholder="e.g. 123 Example Rd, City, ON" style="min-width:220px"><button class="btn" data-act="shipFromAdd">Add</button></div></div>' +
     '<div class="card"><h2>PIN</h2><p class="muted small">Needed to edit part # / qty / description, delete jobs, lists and received items, and restore backups. ' + (S.set.pin ? 'A PIN is set.' : 'No PIN set.') + '</p>' +
     '<div class="row"><input class="search" id="pinNew" inputmode="numeric" placeholder="New PIN (4+ digits)" style="min-width:160px"><button class="btn" data-act="pinSet">' + (S.set.pin ? 'Change' : 'Set') + ' PIN</button>' + (S.set.pin ? '<button class="btn danger" data-act="pinClear">Remove</button>' : '') + '</div></div>' +
     '<div class="card"><h2>Receiving labels</h2><div class="form"><div class="two"><label>Width (in)<input id="lw" value="' + esc(L.w) + '"></label><label>Height (in)<input id="lh" value="' + esc(L.h) + '"></label></div>' +
@@ -1014,7 +1084,7 @@ function jobReportHtml(j, first){
     h += '<p class="small"><b>Packaging:</b> ' + j.packaging.map(p => pkgType(p.type).label + ' ×' + p.qty).join(', ') + '</p>';
   }
   for(const { list, s: ls } of s.lists){
-    h += '<h2>' + esc(list.title) + (list.carNo ? ' · CAR ' + esc(list.carNo) : '') + ' · REV ' + esc(list.rev || '') + ' — ' + pct(ls.pct) + ' (' + ls.done + '/' + ls.total + ')</h2>' +
+    h += '<h2>' + esc(list.title) + (list.carNo ? ' · CAR ' + esc(list.carNo) : '') + ' · REV ' + esc(list.rev || '') + (list.shipDate ? ' · SHIP ' + esc(list.shipDate) : '') + ' — ' + pct(ls.pct) + ' (' + ls.done + '/' + ls.total + ')</h2>' +
       '<table><thead><tr><th class="c">#</th><th>Part #</th><th class="c">Qty</th><th>Description</th>' + Model.DEPTS.map(d => '<th class="c">' + d[1].split(' ')[0] + '</th>').join('') +
       '<th class="c">Pkg qty</th><th class="c">Pkg</th><th class="c">QC</th><th class="c">Skid</th><th class="c">Box</th><th class="c">B/O</th><th class="c">B/O init</th><th class="c">B/O date</th><th>Material</th><th>Status</th></tr></thead><tbody>' +
       list.items.map(ln => {
@@ -1041,11 +1111,13 @@ function doPrint(html){
   setTimeout(() => window.print(), 60);
 }
 function printAll(detail){
-  const jobs = S.jobs.filter(j => j.status !== 'closed').map(j => ({ j, s: jobStats(j) })).sort((a, b) => b.s.pct - a.s.pct);
+  const { scheduled, unscheduled } = sortedJobRows(S.jobs.filter(j => j.status !== 'closed'));
+  const jobs = [...scheduled, ...unscheduled];
+  const sortNote = S.ui.dashSort === 'ship' ? 'next to ship first, unscheduled jobs last' : 'closest to completion first';
   let h = '<section><div class="pr-h"><h1>MEII Shop Floor — Job status report</h1><span>' + esc(new Date().toLocaleString()) + '</span></div>' +
-    '<p>Active jobs, closest to completion first. A line is done when all five departments and QC are signed and nothing is on back order.</p>' +
-    '<table><thead><tr><th>#</th><th>Job #</th><th>Job name</th><th>Customer</th><th>Lists</th><th class="c">Lines</th><th class="c">Done</th><th class="c">% done</th><th class="c">In progress</th><th class="c">B/O lines</th><th class="c">B/O pcs</th><th class="c">Received</th><th class="c">Unmatched</th><th>Last activity</th></tr></thead><tbody>' +
-    jobs.map(({ j, s }, i) => '<tr><td>' + (i + 1) + '</td><td>' + esc(j.jobNo) + '</td><td>' + esc(j.jobName || '') + '</td><td>' + esc(j.customer || '') + '</td><td>' + esc(s.lists.map(x => (x.list.groupKey === 'X' ? x.list.title : x.list.groupKey) + (x.list.carNo ? '/' + x.list.carNo : '') + ' ' + pct(x.s.pct)).join(', ')) + '</td>' +
+    '<p>Active jobs, ' + sortNote + '. A line is done when all five departments and QC are signed and nothing is on back order.</p>' +
+    '<table><thead><tr><th>#</th><th>Job #</th><th>Job name</th><th>Customer</th><th>Next ship</th><th>Lists</th><th class="c">Lines</th><th class="c">Done</th><th class="c">% done</th><th class="c">In progress</th><th class="c">B/O lines</th><th class="c">B/O pcs</th><th class="c">Received</th><th class="c">Unmatched</th><th>Last activity</th></tr></thead><tbody>' +
+    jobs.map(({ j, s, ship }, i) => '<tr><td>' + (i + 1) + '</td><td>' + esc(j.jobNo) + '</td><td>' + esc(j.jobName || '') + '</td><td>' + esc(j.customer || '') + '</td><td>' + esc(ship || '—') + '</td><td>' + esc(s.lists.map(x => (x.list.groupKey === 'X' ? x.list.title : x.list.groupKey) + (x.list.carNo ? '/' + x.list.carNo : '') + ' ' + pct(x.s.pct)).join(', ')) + '</td>' +
       '<td class="c">' + s.total + '</td><td class="c">' + s.done + '</td><td class="c"><b>' + pct(s.pct) + '</b></td><td class="c">' + s.partial + '</td><td class="c">' + s.bo + '</td><td class="c">' + s.boPcs + '</td><td class="c">' + s.recv + '</td><td class="c">' + s.unmatched + '</td><td>' + esc(when(s.last)) + '</td></tr>').join('') +
     '</tbody></table></section>';
   if(detail) h += jobs.map(({ j }) => jobReportHtml(j, false)).join('');
@@ -1136,6 +1208,76 @@ function printBoRollup(rows){
     rows.map(({ j, ln }) => '<tr><td>' + esc(j.jobNo) + '</td><td>' + esc(ln.p) + '</td><td>' + esc(ln.d) + '</td><td class="c">' + esc(ln.boQty) + '</td><td>' + esc(ln.boInit || '') + '</td><td>' + esc(ln.boDate || '') + '</td></tr>').join('') +
     '</tbody></table></section>';
   doPrint(h);
+}
+
+/* ---- shipping: ship date, weight/skids, carrier RFQ, booked info (per list - each car can ship separately) ---- */
+// Pure: builds the mailto: URL from a list/job/email. Kept separate from
+// sendRfq's side effects (logging, saving, navigating) so it's easy to test
+// and to tweak the wording without touching anything stateful.
+function rfqMailto(l, j, email){
+  const autoSkid = new Set(l.items.map(x => (x.skid || '').trim()).filter(Boolean)).size;
+  const skids = l.skidCount || autoSkid;
+  const subject = 'Freight RFQ - ' + j.jobNo + (l.carNo ? ' CAR ' + l.carNo : (l.title ? ' ' + l.title : '')) + (l.shipDate ? ' - ship ' + l.shipDate : '');
+  const body = [
+    'Hi,', '',
+    'Please quote freight for the following shipment:', '',
+    'Pickup: ' + (l.shipFrom || '—'),
+    'Delivery: ' + (j.shipAddr || '—').replace(/\n/g, ', '),
+    'Ready to ship: ' + (fmtDateLong(l.shipDate) || 'TBD'),
+    'Skids: ' + (skids || 'TBD'),
+    'Weight: ' + (l.weightKg ? l.weightKg + ' kg' : 'TBD'),
+    'Site contact: ' + (l.contactName || j.attn || '—') + (l.contactPhone ? ' · ' + l.contactPhone : ''),
+    'Reference: ' + j.jobNo + (l.carNo ? ' / CAR ' + l.carNo : ''),
+    '', 'Please confirm rate and transit time at your earliest convenience.', '', 'Thank you,'
+  ].join('\r\n');
+  return 'mailto:' + email.trim() + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
+}
+async function sendRfq(l, j, email){
+  const url = rfqMailto(l, j, email);
+  l.rfqLog = l.rfqLog || [];
+  l.rfqLog.push({ id: uid(), at: nowIso(), email });
+  l.lastRfqEmail = email;
+  await saveList(l);
+  closeSheet();
+  toast('Opening email to ' + email);
+  window.location.href = url;
+}
+function listShip(){
+  const l = curList(), j = job(l.jobId);
+  l.rfqLog = l.rfqLog || [];
+  const autoSkid = new Set(l.items.map(x => (x.skid || '').trim()).filter(Boolean)).size;
+  openSheet('<h2>Shipping — ' + esc(l.title || 'PRODUCT LIST') + (l.carNo ? ' · CAR ' + esc(l.carNo) : '') + '</h2>' +
+    '<div class="form" id="shf">' +
+    '<div class="two"><label>Ship date<input type="date" data-sf="shipDate" value="' + esc(l.shipDate || '') + '"></label>' +
+    '<label>Weight (kg)<input data-sf="weightKg" inputmode="decimal" value="' + esc(l.weightKg || '') + '"></label></div>' +
+    '<div class="two"><label>Skid count' + (autoSkid ? ' <span class="muted small">(suggest ' + autoSkid + ' from skid #s logged)</span>' : '') +
+    '<input data-sf="skidCount" inputmode="numeric" value="' + esc(l.skidCount || '') + '" placeholder="' + (autoSkid || '') + '"></label>' +
+    '<label>Ship from<select data-sf="shipFrom"><option value="">—</option>' + S.set.shipFrom.map(a => '<option' + (l.shipFrom === a ? ' selected' : '') + '>' + esc(a) + '</option>').join('') + '</select></label></div>' +
+    '<div class="two"><label>Site contact name<input data-sf="contactName" value="' + esc(l.contactName || '') + '" placeholder="' + esc(j.attn || '') + '"></label>' +
+    '<label>Site contact phone<input data-sf="contactPhone" value="' + esc(l.contactPhone || '') + '"></label></div></div>' +
+    '<h3 class="small muted" style="margin-top:14px">BOOKED</h3><div class="form">' +
+    '<div class="two"><label>Carrier<input data-sf="bookedCarrier" value="' + esc(l.bookedCarrier || '') + '"></label>' +
+    '<label>Rate ($ CAD)<input data-sf="bookedRate" inputmode="decimal" value="' + esc(l.bookedRate || '') + '"></label></div>' +
+    '<label>BOL / PRO #<input data-sf="bookedBol" value="' + esc(l.bookedBol || '') + '"></label></div>' +
+    '<h3 class="small muted" style="margin-top:14px">REQUEST A QUOTE</h3><div class="form">' +
+    '<label>Carrier email<input id="rfqEmail" value="' + esc(l.lastRfqEmail || '') + '" placeholder="dispatch@carrier.com" autocomplete="off"></label></div>' +
+    '<div class="row" style="margin-top:4px"><span class="sp"></span><button class="btn" data-g="rfq">Email RFQ</button></div>' +
+    (l.rfqLog.length ? '<h3 class="small muted" style="margin-top:14px">RFQ LOG</h3><div class="opts">' +
+      l.rfqLog.slice().sort((a, b) => (b.at || '').localeCompare(a.at || '')).map(x => '<div class="opt" style="cursor:default"><span>' + esc(x.email) + '<br><span class="small muted">' + esc(when(x.at)) + '</span></span></div>').join('') + '</div>' : '') +
+    '<div class="row" style="margin-top:12px"><span class="sp"></span><button class="btn" data-g="x">Cancel</button><button class="btn dark" data-g="s">Save</button></div>');
+  $('#sheet').onclick = async e => {
+    const b = e.target.closest('[data-g]'); if(!b) return;
+    const collect = () => document.querySelectorAll('#sheet [data-sf]').forEach(i => l[i.dataset.sf] = i.value.trim());
+    if(b.dataset.g === 's'){ collect(); await saveList(l); closeSheet(); render(); toast('Saved'); }
+    else if(b.dataset.g === 'rfq'){
+      collect();
+      const email = ($('#rfqEmail').value || '').trim();
+      if(!email) return toast('Enter a carrier email first', true);
+      await sendRfq(l, j, email);
+      render();
+    }
+    else closeSheet();
+  };
 }
 
 /* ---- job info (name, customer, ship-to, weight/freight, packaging log) ---- */
@@ -1393,6 +1535,7 @@ const A = {
   goJob: b => openJobTab(b.dataset.id),
   closeTab: (b, e) => { e.stopPropagation(); S.set.openTabs = S.set.openTabs.filter(x => x !== b.dataset.id); saveSet('openTabs'); if(S.view.jobId === b.dataset.id) go({ name: 'dash' }); else renderTabs(); },
   dashFilter: b => { S.ui.dashFilter = b.dataset.k; render(); },
+  dashSort: b => { S.ui.dashSort = b.dataset.k; render(); },
   sub: b => { S.view.sub = b.dataset.k; closeDrawer(); render(); },
   lfilter: b => { S.ui.listFilter[S.view.sub] = b.dataset.k; render(); },
   importList: b => { IMP_TARGET = { jobId: b.dataset.job, listId: b.dataset.list }; $('#fileList').value = ''; $('#fileList').click(); },
@@ -1419,17 +1562,18 @@ const A = {
     for(const r of S.receipts) if((r.matches || []).some(m => m.listId === l.id)){ r.matches = r.matches.filter(m => m.listId !== l.id); await saveReceipt(r); }
     S.view.sub = null; render();
   },
+  listShip: () => listShip(),
   listInfo: () => {
     const l = curList(); l.sig = l.sig || {}; l.orderType = l.orderType || {};
     openSheet('<h2>Signatures &amp; order type</h2><div class="form" id="sigf"><div class="chips">' + ['warranty', 'chargeable', 'rma', 'stock'].map(k => '<label class="chip"><input type="checkbox" data-ot="' + k + '"' + (l.orderType[k] ? ' checked' : '') + '> ' + k.toUpperCase() + '</label>').join('') + '</div>' +
       '<div class="two"><label>Shipping manager<input data-sg="shipMgr" value="' + esc(l.sig.shipMgr || '') + '"></label><label>Date<input type="date" data-sg="shipDate" value="' + esc(l.sig.shipDate || '') + '"></label></div>' +
-      '<div class="two"><label>Quality manager<input data-sg="qcMgr" value="' + esc(l.sig.qcMgr || '') + '"></label><label>Date<input type="date" data-sg="qcDate" value="' + esc(l.sig.qcDate || '') + '"></label></div>' +
-      '<label>Ship date<input data-sg="listShip" value="' + esc(l.shipDate || '') + '"></label></div><div class="row" style="margin-top:12px"><span class="sp"></span><button class="btn" data-g="x">Cancel</button><button class="btn dark" data-g="s">Save</button></div>');
+      '<div class="two"><label>Quality manager<input data-sg="qcMgr" value="' + esc(l.sig.qcMgr || '') + '"></label><label>Date<input type="date" data-sg="qcDate" value="' + esc(l.sig.qcDate || '') + '"></label></div></div>' +
+      '<div class="row" style="margin-top:12px"><span class="sp"></span><button class="btn" data-g="x">Cancel</button><button class="btn dark" data-g="s">Save</button></div>');
     $('#sheet').onclick = async e => {
       const b = e.target.closest('[data-g]'); if(!b) return;
       if(b.dataset.g === 's'){
         document.querySelectorAll('#sigf [data-ot]').forEach(i => l.orderType[i.dataset.ot] = i.checked);
-        document.querySelectorAll('#sigf [data-sg]').forEach(i => { if(i.dataset.sg === 'listShip') l.shipDate = i.value; else l.sig[i.dataset.sg] = i.value; });
+        document.querySelectorAll('#sigf [data-sg]').forEach(i => l.sig[i.dataset.sg] = i.value);
         await saveList(l); toast('Saved');
       }
       closeSheet();
@@ -1475,6 +1619,8 @@ const A = {
   commitImport: () => commitImport(),
   staffAdd: () => { const v = $('#staffNew').value.trim().toUpperCase(); if(!v) return; if(!S.set.staff.includes(v)) S.set.staff.push(v); saveSet('staff'); render(); },
   staffDel: b => { S.set.staff.splice(+b.dataset.i, 1); saveSet('staff'); render(); },
+  shipFromAdd: () => { const v = $('#shipFromNew').value.trim(); if(!v) return; S.set.shipFrom = S.set.shipFrom || []; if(!S.set.shipFrom.includes(v)) S.set.shipFrom.push(v); saveSet('shipFrom'); render(); },
+  shipFromDel: b => { S.set.shipFrom.splice(+b.dataset.i, 1); saveSet('shipFrom'); render(); },
   pinSet: async () => {
     const v = $('#pinNew').value.trim();
     if(!/^\d{4,8}$/.test(v)) return toast('PIN must be 4–8 digits', true);
