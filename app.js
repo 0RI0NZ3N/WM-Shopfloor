@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v11';
+const APP_VERSION = 'v12';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -152,9 +152,34 @@ function normalizeDateStr(s){
   }
   return '';
 }
+// A list can go out in more than one shipment - e.g. most lines ship now,
+// whatever's on back order follows later as its own truck/RFQ once it comes
+// in. So shipping info lives in list.shipments[], not flat on the list.
+function newShipment(overrides){
+  return Object.assign({ id: uid(), label: '', shipDate: '', weightKg: '', skidCount: '', shipFrom: '', contactName: '', contactPhone: '',
+    bookedCarrier: '', bookedRate: '', bookedBol: '', lastRfqEmail: '', rfqLog: [], shippedAt: null }, overrides || {});
+}
+function pendingShipments(l){
+  return (l.shipments || []).filter(sp => !sp.shippedAt).sort((a, b) => (a.shipDate || '9999-99-99').localeCompare(b.shipDate || '9999-99-99'));
+}
 function jobNextShip(j){
-  const ds = listsOf(j.id).map(l => l.shipDate).filter(Boolean).sort();
+  const ds = [];
+  for(const l of listsOf(j.id)) for(const sp of pendingShipments(l)) if(sp.shipDate) ds.push(sp.shipDate);
+  ds.sort();
   return ds[0] || null;
+}
+function shipSummaryHtml(list){
+  const sps = list.shipments || [];
+  if(!sps.length) return '<span class="tag">No shipment scheduled</span>';
+  const pending = pendingShipments(list);
+  const shippedCount = sps.length - pending.length;
+  if(!pending.length) return '<span class="tag ok">All ' + sps.length + ' shipment' + (sps.length > 1 ? 's' : '') + ' shipped</span>';
+  const next = pending[0];
+  return (next.shipDate ? 'Ship ' + esc(fmtDateLong(next.shipDate)) + ' ' + shipBadge(next.shipDate) : '<span class="tag">Date TBD</span>') +
+    (next.label ? ' · ' + esc(next.label) : '') +
+    (next.weightKg ? ' · ' + esc(next.weightKg) + ' kg' : '') + (next.skidCount ? ' · ' + esc(next.skidCount) + ' skids' : '') +
+    (next.bookedCarrier ? ' · booked ' + esc(next.bookedCarrier) : '') +
+    (pending.length > 1 ? ' · +' + (pending.length - 1) + ' more pending' : '') + (shippedCount ? ' · ' + shippedCount + ' shipped' : '');
 }
 function fmtDateLong(iso){
   if(!iso) return '';
@@ -398,9 +423,7 @@ function viewList(j, list){
     '<button class="btn sm" data-act="importList" data-job="' + esc(j.id) + '" data-list="' + list.id + '">Update from PDF</button>' +
     '<button class="btn sm" data-act="listInfo">Signatures</button>' +
     '<button class="btn sm' + (edit ? ' dark' : '') + '" data-act="editLines">' + (edit ? 'Done editing' : 'Edit lines') + '</button></div>';
-  h += '<div class="ltool"><span class="muted small">' + (list.shipDate ? 'Ship ' + esc(fmtDateLong(list.shipDate)) + ' ' + shipBadge(list.shipDate) : '<span class="tag">No ship date set</span>') +
-    (list.weightKg ? ' · ' + esc(list.weightKg) + ' kg' : '') + (list.skidCount ? ' · ' + esc(list.skidCount) + ' skids' : '') +
-    (list.bookedCarrier ? ' · booked ' + esc(list.bookedCarrier) : '') + '</span><span class="sp"></span><button class="btn sm" data-act="listShip">Shipping</button></div>';
+  h += '<div class="ltool"><span class="muted small">' + shipSummaryHtml(list) + '</span><span class="sp"></span><button class="btn sm" data-act="listShip">Shipping</button></div>';
   h += '<div class="ltool"><div class="chips" id="lchips">' + [['all', 'All', st.total], ['open', 'Open', st.total - st.done], ['bo', 'Back order', st.bo], ['done', 'Done', st.done]]
     .map(([k, t, n]) => '<button class="chip' + (f === k ? ' on' : '') + '" data-act="lfilter" data-k="' + k + '">' + t + ' <b>' + n + '</b></button>').join('') + '</div>' +
     '<span class="sp"></span><span class="muted small">Tap a part # for history, material and back-order details. Tap a box to sign.</span></div>';
@@ -986,13 +1009,18 @@ async function commitImport(){
     });
     for(const o of old) if(!used.has(o)){ o.revNote = 'Not on REV ' + (h.rev || '?'); items.push(o); dropped++; }
     list.items = items;
-    // shipDate is scheduled here, in the app, once a date is known - the PDF's
-    // own "SHIP DATE:" field is normally blank, so re-importing/updating from
-    // a fresh PDF must never clobber a date already entered on this list.
-    Object.assign(list, { title: h.title || list.title, groupKey: Model.groupKey(h.title || list.title), carNo: h.carNo, rev: h.rev, shipDate: normalizeDateStr(h.shipDate) || list.shipDate, formRev: h.formRev, printed: h.printed, importedAt: nowIso(), mode: r.mode });
+    // Shipments (ship date, weight, carrier, etc.) are scheduled here in the
+    // app and can be split across more than one truck (e.g. back order
+    // follows later) - re-importing/updating from a fresh PDF never touches
+    // them, so nothing already scheduled is ever lost.
+    Object.assign(list, { title: h.title || list.title, groupKey: Model.groupKey(h.title || list.title), carNo: h.carNo, rev: h.rev, formRev: h.formRev, printed: h.printed, importedAt: nowIso(), mode: r.mode });
   } else {
-    list = { id: uid(), jobId: j.id, title: (h.title || 'PRODUCT LIST').toUpperCase(), groupKey: Model.groupKey(h.title), carNo: h.carNo, rev: h.rev, shipDate: normalizeDateStr(h.shipDate),
-      formRev: h.formRev, printed: h.printed, orderType: {}, sig: {}, rfqLog: [], importedAt: nowIso(), mode: r.mode, items: lines.map((src, i) => newLine(src, src.n || i + 1)) };
+    list = { id: uid(), jobId: j.id, title: (h.title || 'PRODUCT LIST').toUpperCase(), groupKey: Model.groupKey(h.title), carNo: h.carNo, rev: h.rev, shipments: [],
+      formRev: h.formRev, printed: h.printed, orderType: {}, sig: {}, importedAt: nowIso(), mode: r.mode, items: lines.map((src, i) => newLine(src, src.n || i + 1)) };
+    // The PDF's own "SHIP DATE:" field is normally blank on the ERP form, but
+    // seed a first shipment with it when it's actually filled in.
+    const seedDate = normalizeDateStr(h.shipDate);
+    if(seedDate) list.shipments.push(newShipment({ shipDate: seedDate }));
     list.items.forEach((ln, i) => applied += applyFilled(ln, lines[i].filled));
     S.lists.push(list);
   }
@@ -1084,7 +1112,8 @@ function jobReportHtml(j, first){
     h += '<p class="small"><b>Packaging:</b> ' + j.packaging.map(p => pkgType(p.type).label + ' ×' + p.qty).join(', ') + '</p>';
   }
   for(const { list, s: ls } of s.lists){
-    h += '<h2>' + esc(list.title) + (list.carNo ? ' · CAR ' + esc(list.carNo) : '') + ' · REV ' + esc(list.rev || '') + (list.shipDate ? ' · SHIP ' + esc(list.shipDate) : '') + ' — ' + pct(ls.pct) + ' (' + ls.done + '/' + ls.total + ')</h2>' +
+    const nextSp = pendingShipments(list)[0];
+    h += '<h2>' + esc(list.title) + (list.carNo ? ' · CAR ' + esc(list.carNo) : '') + ' · REV ' + esc(list.rev || '') + (nextSp && nextSp.shipDate ? ' · SHIP ' + esc(nextSp.shipDate) + (nextSp.label ? ' (' + esc(nextSp.label) + ')' : '') : '') + ' — ' + pct(ls.pct) + ' (' + ls.done + '/' + ls.total + ')</h2>' +
       '<table><thead><tr><th class="c">#</th><th>Part #</th><th class="c">Qty</th><th>Description</th>' + Model.DEPTS.map(d => '<th class="c">' + d[1].split(' ')[0] + '</th>').join('') +
       '<th class="c">Pkg qty</th><th class="c">Pkg</th><th class="c">QC</th><th class="c">Skid</th><th class="c">Box</th><th class="c">B/O</th><th class="c">B/O init</th><th class="c">B/O date</th><th>Material</th><th>Status</th></tr></thead><tbody>' +
       list.items.map(ln => {
@@ -1210,33 +1239,36 @@ function printBoRollup(rows){
   doPrint(h);
 }
 
-/* ---- shipping: ship date, weight/skids, carrier RFQ, booked info (per list - each car can ship separately) ---- */
-// Pure: builds the mailto: URL from a list/job/email. Kept separate from
+/* ---- shipping: ship date, weight/skids, carrier RFQ, booked info ----
+   A list can go out in more than one shipment (most lines now, whatever's on
+   back order later, once it's in) so each list holds shipments[], and every
+   shipment carries its own date/weight/skids/carrier/RFQ log/booked info. */
+// Pure: builds the mailto: URL for one shipment. Kept separate from
 // sendRfq's side effects (logging, saving, navigating) so it's easy to test
 // and to tweak the wording without touching anything stateful.
-function rfqMailto(l, j, email){
+function rfqMailto(l, j, sp, email){
   const autoSkid = new Set(l.items.map(x => (x.skid || '').trim()).filter(Boolean)).size;
-  const skids = l.skidCount || autoSkid;
-  const subject = 'Freight RFQ - ' + j.jobNo + (l.carNo ? ' CAR ' + l.carNo : (l.title ? ' ' + l.title : '')) + (l.shipDate ? ' - ship ' + l.shipDate : '');
+  const skids = sp.skidCount || autoSkid;
+  const subject = 'Freight RFQ - ' + j.jobNo + (l.carNo ? ' CAR ' + l.carNo : (l.title ? ' ' + l.title : '')) + (sp.label ? ' - ' + sp.label : '') + (sp.shipDate ? ' - ship ' + sp.shipDate : '');
   const body = [
     'Hi,', '',
     'Please quote freight for the following shipment:', '',
-    'Pickup: ' + (l.shipFrom || '—'),
+    'Pickup: ' + (sp.shipFrom || '—'),
     'Delivery: ' + (j.shipAddr || '—').replace(/\n/g, ', '),
-    'Ready to ship: ' + (fmtDateLong(l.shipDate) || 'TBD'),
+    'Ready to ship: ' + (fmtDateLong(sp.shipDate) || 'TBD'),
     'Skids: ' + (skids || 'TBD'),
-    'Weight: ' + (l.weightKg ? l.weightKg + ' kg' : 'TBD'),
-    'Site contact: ' + (l.contactName || j.attn || '—') + (l.contactPhone ? ' · ' + l.contactPhone : ''),
-    'Reference: ' + j.jobNo + (l.carNo ? ' / CAR ' + l.carNo : ''),
+    'Weight: ' + (sp.weightKg ? sp.weightKg + ' kg' : 'TBD'),
+    'Site contact: ' + (sp.contactName || j.attn || '—') + (sp.contactPhone ? ' · ' + sp.contactPhone : ''),
+    'Reference: ' + j.jobNo + (l.carNo ? ' / CAR ' + l.carNo : '') + (sp.label ? ' / ' + sp.label : ''),
     '', 'Please confirm rate and transit time at your earliest convenience.', '', 'Thank you,'
   ].join('\r\n');
   return 'mailto:' + email.trim() + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
 }
-async function sendRfq(l, j, email){
-  const url = rfqMailto(l, j, email);
-  l.rfqLog = l.rfqLog || [];
-  l.rfqLog.push({ id: uid(), at: nowIso(), email });
-  l.lastRfqEmail = email;
+async function sendRfq(l, j, sp, email){
+  const url = rfqMailto(l, j, sp, email);
+  sp.rfqLog = sp.rfqLog || [];
+  sp.rfqLog.push({ id: uid(), at: nowIso(), email });
+  sp.lastRfqEmail = email;
   await saveList(l);
   closeSheet();
   toast('Opening email to ' + email);
@@ -1244,39 +1276,77 @@ async function sendRfq(l, j, email){
 }
 function listShip(){
   const l = curList(), j = job(l.jobId);
-  l.rfqLog = l.rfqLog || [];
+  l.shipments = l.shipments || [];
+  // The common case (one shipment) jumps straight to the form, same feel as
+  // before; a second+ shipment (e.g. the B/O follow-up) goes through the
+  // overview so existing shipments are never edited by accident.
+  if(!l.shipments.length){
+    const sp = newShipment();
+    l.shipments.push(sp);
+    editShipment(l, j, sp);
+  } else drawShipList(l, j);
+}
+function drawShipList(l, j){
+  const rows = l.shipments.slice().sort((a, b) => (a.shipDate || '9999-99-99').localeCompare(b.shipDate || '9999-99-99'));
+  openSheet('<h2>Shipments — ' + esc(l.title || 'PRODUCT LIST') + (l.carNo ? ' · CAR ' + esc(l.carNo) : '') + '</h2>' +
+    '<p class="muted small">A list can ship in more than one load — add another when part of it (like a back order) goes out separately.</p>' +
+    '<div class="opts">' + rows.map(sp => {
+      const badge = sp.shippedAt ? '<span class="tag ok">Shipped</span>' : (sp.shipDate ? shipBadge(sp.shipDate) : '<span class="tag">No date</span>');
+      return '<button class="opt" data-sp="' + sp.id + '"><span><b>' + esc(sp.label || 'Shipment') + '</b>' + (sp.shipDate ? ' · ' + esc(fmtDateLong(sp.shipDate)) : '') + (sp.bookedCarrier ? ' · ' + esc(sp.bookedCarrier) : '') + '</span><span class="sc">' + badge + '</span></button>';
+    }).join('') + '</div>' +
+    '<div class="row" style="margin-top:10px"><span class="sp"></span><button class="btn" data-sp="__new">+ Add shipment</button><button class="btn" data-sp="__x">Close</button></div>');
+  $('#sheet').onclick = e => {
+    const b = e.target.closest('[data-sp]'); if(!b) return;
+    if(b.dataset.sp === '__x') return closeSheet();
+    if(b.dataset.sp === '__new'){ const sp = newShipment(); l.shipments.push(sp); editShipment(l, j, sp); return; }
+    const sp = l.shipments.find(x => x.id === b.dataset.sp);
+    if(sp) editShipment(l, j, sp);
+  };
+}
+function editShipment(l, j, sp){
+  sp.rfqLog = sp.rfqLog || [];
   const autoSkid = new Set(l.items.map(x => (x.skid || '').trim()).filter(Boolean)).size;
-  openSheet('<h2>Shipping — ' + esc(l.title || 'PRODUCT LIST') + (l.carNo ? ' · CAR ' + esc(l.carNo) : '') + '</h2>' +
+  openSheet('<h2>' + esc(sp.label || 'Shipment') + ' — ' + esc(l.title || 'PRODUCT LIST') + (l.carNo ? ' · CAR ' + esc(l.carNo) : '') + '</h2>' +
     '<div class="form" id="shf">' +
-    '<div class="two"><label>Ship date<input type="date" data-sf="shipDate" value="' + esc(l.shipDate || '') + '"></label>' +
-    '<label>Weight (kg)<input data-sf="weightKg" inputmode="decimal" value="' + esc(l.weightKg || '') + '"></label></div>' +
+    '<label>Label (optional)<input data-sf="label" value="' + esc(sp.label || '') + '" placeholder="e.g. Main shipment, B/O follow-up"></label>' +
+    '<div class="two"><label>Ship date<input type="date" data-sf="shipDate" value="' + esc(sp.shipDate || '') + '"></label>' +
+    '<label>Weight (kg)<input data-sf="weightKg" inputmode="decimal" value="' + esc(sp.weightKg || '') + '"></label></div>' +
     '<div class="two"><label>Skid count' + (autoSkid ? ' <span class="muted small">(suggest ' + autoSkid + ' from skid #s logged)</span>' : '') +
-    '<input data-sf="skidCount" inputmode="numeric" value="' + esc(l.skidCount || '') + '" placeholder="' + (autoSkid || '') + '"></label>' +
-    '<label>Ship from<select data-sf="shipFrom"><option value="">—</option>' + S.set.shipFrom.map(a => '<option' + (l.shipFrom === a ? ' selected' : '') + '>' + esc(a) + '</option>').join('') + '</select></label></div>' +
-    '<div class="two"><label>Site contact name<input data-sf="contactName" value="' + esc(l.contactName || '') + '" placeholder="' + esc(j.attn || '') + '"></label>' +
-    '<label>Site contact phone<input data-sf="contactPhone" value="' + esc(l.contactPhone || '') + '"></label></div></div>' +
+    '<input data-sf="skidCount" inputmode="numeric" value="' + esc(sp.skidCount || '') + '" placeholder="' + (autoSkid || '') + '"></label>' +
+    '<label>Ship from<select data-sf="shipFrom"><option value="">—</option>' + S.set.shipFrom.map(a => '<option' + (sp.shipFrom === a ? ' selected' : '') + '>' + esc(a) + '</option>').join('') + '</select></label></div>' +
+    '<div class="two"><label>Site contact name<input data-sf="contactName" value="' + esc(sp.contactName || '') + '" placeholder="' + esc(j.attn || '') + '"></label>' +
+    '<label>Site contact phone<input data-sf="contactPhone" value="' + esc(sp.contactPhone || '') + '"></label></div></div>' +
     '<h3 class="small muted" style="margin-top:14px">BOOKED</h3><div class="form">' +
-    '<div class="two"><label>Carrier<input data-sf="bookedCarrier" value="' + esc(l.bookedCarrier || '') + '"></label>' +
-    '<label>Rate ($ CAD)<input data-sf="bookedRate" inputmode="decimal" value="' + esc(l.bookedRate || '') + '"></label></div>' +
-    '<label>BOL / PRO #<input data-sf="bookedBol" value="' + esc(l.bookedBol || '') + '"></label></div>' +
+    '<div class="two"><label>Carrier<input data-sf="bookedCarrier" value="' + esc(sp.bookedCarrier || '') + '"></label>' +
+    '<label>Rate ($ CAD)<input data-sf="bookedRate" inputmode="decimal" value="' + esc(sp.bookedRate || '') + '"></label></div>' +
+    '<label>BOL / PRO #<input data-sf="bookedBol" value="' + esc(sp.bookedBol || '') + '"></label></div>' +
     '<h3 class="small muted" style="margin-top:14px">REQUEST A QUOTE</h3><div class="form">' +
-    '<label>Carrier email<input id="rfqEmail" value="' + esc(l.lastRfqEmail || '') + '" placeholder="dispatch@carrier.com" autocomplete="off"></label></div>' +
+    '<label>Carrier email<input id="rfqEmail" value="' + esc(sp.lastRfqEmail || '') + '" placeholder="dispatch@carrier.com" autocomplete="off"></label></div>' +
     '<div class="row" style="margin-top:4px"><span class="sp"></span><button class="btn" data-g="rfq">Email RFQ</button></div>' +
-    (l.rfqLog.length ? '<h3 class="small muted" style="margin-top:14px">RFQ LOG</h3><div class="opts">' +
-      l.rfqLog.slice().sort((a, b) => (b.at || '').localeCompare(a.at || '')).map(x => '<div class="opt" style="cursor:default"><span>' + esc(x.email) + '<br><span class="small muted">' + esc(when(x.at)) + '</span></span></div>').join('') + '</div>' : '') +
-    '<div class="row" style="margin-top:12px"><span class="sp"></span><button class="btn" data-g="x">Cancel</button><button class="btn dark" data-g="s">Save</button></div>');
+    (sp.rfqLog.length ? '<h3 class="small muted" style="margin-top:14px">RFQ LOG</h3><div class="opts">' +
+      sp.rfqLog.slice().sort((a, b) => (b.at || '').localeCompare(a.at || '')).map(x => '<div class="opt" style="cursor:default"><span>' + esc(x.email) + '<br><span class="small muted">' + esc(when(x.at)) + '</span></span></div>').join('') + '</div>' : '') +
+    '<div class="row" style="margin-top:14px"><label class="chip" style="cursor:pointer"><input type="checkbox" id="spShipped"' + (sp.shippedAt ? ' checked' : '') + '> Mark this shipment as shipped</label></div>' +
+    '<div class="row" style="margin-top:12px"><button class="btn danger" data-g="del">Delete shipment</button><span class="sp"></span><button class="btn" data-g="back">Back</button><button class="btn dark" data-g="s">Save</button></div>');
   $('#sheet').onclick = async e => {
     const b = e.target.closest('[data-g]'); if(!b) return;
-    const collect = () => document.querySelectorAll('#sheet [data-sf]').forEach(i => l[i.dataset.sf] = i.value.trim());
-    if(b.dataset.g === 's'){ collect(); await saveList(l); closeSheet(); render(); toast('Saved'); }
-    else if(b.dataset.g === 'rfq'){
+    const collect = () => document.querySelectorAll('#sheet [data-sf]').forEach(i => sp[i.dataset.sf] = i.value.trim());
+    if(b.dataset.g === 's'){
+      collect();
+      sp.shippedAt = $('#spShipped').checked ? (sp.shippedAt || nowIso()) : null;
+      await saveList(l); closeSheet(); render(); toast('Saved');
+    } else if(b.dataset.g === 'back'){ drawShipList(l, j); }
+    else if(b.dataset.g === 'del'){
+      if(!(await confirmSheet('Delete this shipment?', 'Its RFQ log and booked info are lost.', 'Delete', true))) return;
+      l.shipments = l.shipments.filter(x => x !== sp);
+      await saveList(l);
+      if(l.shipments.length) drawShipList(l, j); else { closeSheet(); render(); }
+    } else if(b.dataset.g === 'rfq'){
       collect();
       const email = ($('#rfqEmail').value || '').trim();
       if(!email) return toast('Enter a carrier email first', true);
-      await sendRfq(l, j, email);
-      render();
+      await sendRfq(l, j, sp, email);
+      editShipment(l, j, sp);
     }
-    else closeSheet();
   };
 }
 
