@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v13';
+const APP_VERSION = 'v14';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -672,10 +672,68 @@ function binOptions(){
   for(const r of S.receipts) if(r.bin) seen.add(r.bin);
   return [...seen].map(b => '<option value="' + esc(b) + '">').join('');
 }
+// Stock withdrawals: each stock receipt keeps its own received qty untouched
+// (that's history) plus a withdrawals[] log; on-hand = received - withdrawn.
+// A receipt whose qty isn't a plain number (e.g. "several") can still be
+// taken out, just without a quantity - that one withdrawal empties it.
+function qtyNum(r){ const n = parseFloat(r.qty); return isNaN(n) ? null : n; }
+function withdrawnQty(r){ return (r.withdrawals || []).reduce((a, w) => a + (+w.qty || 0), 0); }
+function onHandQty(r){ const n = qtyNum(r); return n === null ? null : Math.max(0, n - withdrawnQty(r)); }
+function onHandHtml(r){
+  const n = onHandQty(r), uom = esc(r.uom || 'EA');
+  if(n === null) return esc(r.qty || '') + ' ' + uom;
+  const rec = qtyNum(r), out = Math.round(n * 100) / 100;
+  return (withdrawnQty(r) > 0 ? out + ' / ' + rec : String(out)) + ' ' + uom;
+}
+function takeStockSheet(r){
+  const n = onHandQty(r);
+  if(n !== null && n <= 0){
+    openSheet('<h2>Take out of stock</h2><p class="muted">' + esc(r.description) + ' has nothing left on hand.</p>' +
+      '<div class="row" style="margin-top:10px"><span class="sp"></span><button class="btn" data-tk="x">Close</button></div>');
+    $('#sheet').onclick = e => { if(e.target.closest('[data-tk]')) closeSheet(); };
+    return;
+  }
+  if(n === null){
+    openSheet('<h2>Take out of stock</h2><p>' + esc(r.description) + ' · ' + esc(r.qty || '') + ' ' + esc(r.uom || '') + '</p>' +
+      '<p class="muted small">This item isn\'t tracked by quantity, so taking it out marks it fully used.</p>' +
+      '<div class="row" style="margin-top:10px"><button class="btn danger" data-tk="all">Mark fully taken</button><span class="sp"></span><button class="btn" data-tk="x">Cancel</button></div>');
+    $('#sheet').onclick = async e => {
+      const b = e.target.closest('[data-tk]'); if(!b) return;
+      if(b.dataset.tk === 'x') return closeSheet();
+      if(b.dataset.tk === 'all'){
+        r.withdrawals = r.withdrawals || [];
+        r.withdrawals.push({ id: uid(), qty: r.qty || '1', by: S.set.staff[0] || '', note: '', at: nowIso() });
+        await saveReceipt(r); closeSheet(); render(); toast('Marked taken out');
+      }
+    };
+    return;
+  }
+  openSheet('<h2>Take out of stock</h2><p>' + esc(r.description) + ' · bin ' + esc(r.bin || '—') + '</p>' +
+    '<p class="small"><b>On hand:</b> ' + onHandHtml(r) + '</p>' +
+    '<div class="form" id="tkf">' +
+    '<label>Quantity taken<input id="tkQty" inputmode="decimal" value="' + n + '"></label>' +
+    '<label>Taken by<select id="tkBy">' + S.set.staff.map(s => '<option>' + esc(s) + '</option>').join('') + '</select></label>' +
+    '<label>Note (optional)<input id="tkNote" placeholder="e.g. job # or reason"></label></div>' +
+    '<div class="row" style="margin-top:12px"><span class="sp"></span><button class="btn" data-tk="x">Cancel</button><button class="btn dark" data-tk="go">Take out</button></div>');
+  $('#sheet').onclick = async e => {
+    const b = e.target.closest('[data-tk]'); if(!b) return;
+    if(b.dataset.tk === 'x') return closeSheet();
+    if(b.dataset.tk === 'go'){
+      let q = parseFloat($('#tkQty').value);
+      if(isNaN(q) || q <= 0) return toast('Enter a quantity greater than 0', true);
+      const avail = onHandQty(r);
+      if(q > avail){ q = avail; toast('Only ' + avail + ' on hand - taking all of it', true); }
+      r.withdrawals = r.withdrawals || [];
+      r.withdrawals.push({ id: uid(), qty: q, by: $('#tkBy').value, note: $('#tkNote').value.trim(), at: nowIso() });
+      await saveReceipt(r);
+      closeSheet(); render(); toast('Took ' + q + ' ' + (r.uom || 'EA') + ' out of stock');
+    }
+  };
+}
 // Groups stock (non-job) receipts by description + bin so the Inventory tab
-// can show what's actually on the shelf instead of a flat log. No
-// consumption tracking - this is everything ever logged as stock, under
-// that description/bin, by design (Zein's call: keep this simple).
+// can show what's actually on the shelf instead of a flat log. Totals here
+// are ON-HAND (received minus any withdrawals), not just everything ever
+// received.
 function stockGroups(){
   const map = new Map();
   for(const r of S.receipts){
@@ -687,8 +745,8 @@ function stockGroups(){
     const g = map.get(key);
     g.receipts.push(r);
     const uom = r.uom || 'EA';
-    const q = parseFloat(r.qty);
-    g.uomTotals[uom] = (g.uomTotals[uom] || 0) + (isNaN(q) ? 0 : q);
+    const oh = onHandQty(r);
+    g.uomTotals[uom] = (g.uomTotals[uom] || 0) + (oh === null ? 0 : oh);
     if(r.allocatedJob) g.anyAllocated = true;
   }
   return [...map.values()].sort((a, b) => a.description.localeCompare(b.description) || a.bin.localeCompare(b.bin));
@@ -701,14 +759,59 @@ function stockGroupQtyHtml(g){
 function stockGroupDetail(i){
   const g = STOCK_GROUPS[i]; if(!g) return;
   openSheet('<h2>' + esc(g.description) + '</h2><div class="muted small">Bin ' + esc(g.bin || '—') + ' · ' + stockGroupQtyHtml(g) + ' on hand · ' + g.receipts.length + ' receipt' + (g.receipts.length > 1 ? 's' : '') + '</div>' +
+    '<div class="row" style="margin-top:8px"><span class="sp"></span><button class="btn dark" data-g="take">Take out of stock</button></div>' +
     '<div class="opts" style="margin-top:10px">' + g.receipts.slice().sort((a, b) => (b.receivedAt || '').localeCompare(a.receivedAt || '')).map(r =>
-      '<button class="opt" data-r="' + r.id + '"><span><b class="mono">' + esc(r.code) + '</b> ' + esc(r.qty) + ' ' + esc(r.uom || 'EA') + '<br><span class="small muted">' + esc(when(r.receivedAt)) + (r.allocatedJob ? ' · → ' + esc(r.allocatedJob) : '') + '</span></span></button>'
+      '<div class="opt" data-r="' + r.id + '"><span><b class="mono">' + esc(r.code) + '</b> ' + onHandHtml(r) + '<br><span class="small muted">' + esc(when(r.receivedAt)) + (r.allocatedJob ? ' · → ' + esc(r.allocatedJob) : '') + '</span></span><span class="sc"><button class="btn sm" data-tkr="' + r.id + '">Take out</button></span></div>'
     ).join('') + '</div>' +
     '<div class="row" style="margin-top:10px"><span class="sp"></span><button class="btn" data-r="__x">Close</button></div>');
   $('#sheet').onclick = e => {
+    const tkr = e.target.closest('[data-tkr]');
+    if(tkr){ e.stopPropagation(); return takeStockSheet(S.receipts.find(x => x.id === tkr.dataset.tkr)); }
+    const g2 = e.target.closest('[data-g="take"]'); if(g2) return takeStockGroupSheet(i);
     const b = e.target.closest('[data-r]'); if(!b) return;
     if(b.dataset.r === '__x') return closeSheet();
     editRec(S.receipts.find(x => x.id === b.dataset.r));
+  };
+}
+function takeStockGroupSheet(i){
+  const g = STOCK_GROUPS[i]; if(!g) return;
+  const receipts = g.receipts.filter(r => onHandQty(r) !== null && onHandQty(r) > 0).sort((a, b) => (a.receivedAt || '').localeCompare(b.receivedAt || ''));
+  const totalOnHand = receipts.reduce((a, r) => a + onHandQty(r), 0);
+  if(!receipts.length){
+    openSheet('<h2>Take out of stock</h2><p class="muted">Nothing quantified left on hand in this group - open an individual receipt to take it out.</p>' +
+      '<div class="row" style="margin-top:10px"><span class="sp"></span><button class="btn" data-tk="x">Close</button></div>');
+    $('#sheet').onclick = e => { if(e.target.closest('[data-tk]')) closeSheet(); };
+    return;
+  }
+  openSheet('<h2>Take out of stock</h2><p>' + esc(g.description) + ' · bin ' + esc(g.bin || '—') + '</p>' +
+    '<p class="small"><b>On hand:</b> ' + stockGroupQtyHtml(g) + '</p>' +
+    '<div class="form" id="tkf">' +
+    '<label>Quantity taken<input id="tkQty" inputmode="decimal" placeholder="e.g. 10"></label>' +
+    '<label>Taken by<select id="tkBy">' + S.set.staff.map(s => '<option>' + esc(s) + '</option>').join('') + '</select></label>' +
+    '<label>Note (optional)<input id="tkNote" placeholder="e.g. job # or reason"></label></div>' +
+    '<p class="muted small">Taken from the oldest receipts first.</p>' +
+    '<div class="row" style="margin-top:12px"><span class="sp"></span><button class="btn" data-tk="x">Cancel</button><button class="btn dark" data-tk="go">Take out</button></div>');
+  $('#sheet').onclick = async e => {
+    const b = e.target.closest('[data-tk]'); if(!b) return;
+    if(b.dataset.tk === 'x') return closeSheet();
+    if(b.dataset.tk === 'go'){
+      let want = parseFloat($('#tkQty').value);
+      if(isNaN(want) || want <= 0) return toast('Enter a quantity greater than 0', true);
+      if(want > totalOnHand){ want = totalOnHand; toast('Only ' + totalOnHand + ' on hand - taking all of it', true); }
+      const by = $('#tkBy').value, note = $('#tkNote').value.trim(), batchId = uid(), at = nowIso();
+      let remaining = want; const touched = [];
+      for(const r of receipts){
+        if(remaining <= 0) break;
+        const avail = onHandQty(r); if(!avail) continue;
+        const take = Math.min(avail, remaining);
+        r.withdrawals = r.withdrawals || [];
+        r.withdrawals.push({ id: uid(), qty: take, by, note, at, batch: batchId });
+        touched.push(r);
+        remaining -= take;
+      }
+      for(const r of touched) await saveReceipt(r);
+      closeSheet(); render(); toast('Took ' + (want - remaining) + ' out of stock');
+    }
   };
 }
 function viewRecv(){
@@ -735,9 +838,9 @@ function viewRecv(){
     [['stock', 'Stock on hand'], ['log', 'All receipts']].map(([k, t2]) => '<button class="chip' + (view === k ? ' on' : '') + '" data-act="recvView" data-k="' + k + '">' + t2 + '</button>').join('') + '</div></div>';
   if(view === 'stock'){
     STOCK_GROUPS = stockGroups();
-    h += '<div class="card" style="padding:0;overflow:auto;max-height:calc(100vh - 210px)"><table class="list"><thead><tr><th>Description</th><th>Bin</th><th>On hand</th><th>Receipts</th><th></th></tr></thead><tbody>' +
-      (STOCK_GROUPS.map((g, i) => '<tr class="click" data-act="stockGroup" data-i="' + i + '"><td>' + esc(g.description) + '</td><td>' + esc(g.bin || '—') + '</td><td>' + esc(stockGroupQtyHtml(g)) + '</td><td>' + g.receipts.length + '</td><td>' + (g.anyAllocated ? '<span class="tag stock">earmarked</span>' : '') + '</td></tr>').join('') ||
-        '<tr><td colspan="5" class="muted" style="text-align:center;padding:30px">No stock received yet.</td></tr>') + '</tbody></table></div></div>';
+    h += '<div class="card" style="padding:0;overflow:auto;max-height:calc(100vh - 210px)"><table class="list"><thead><tr><th>Description</th><th>Bin</th><th>On hand</th><th>Receipts</th><th></th><th></th></tr></thead><tbody>' +
+      (STOCK_GROUPS.map((g, i) => '<tr class="click" data-act="stockGroup" data-i="' + i + '"><td>' + esc(g.description) + '</td><td>' + esc(g.bin || '—') + '</td><td>' + esc(stockGroupQtyHtml(g)) + '</td><td>' + g.receipts.length + '</td><td>' + (g.anyAllocated ? '<span class="tag stock">earmarked</span>' : '') + '</td><td><button class="btn sm" data-act="takeStockGroup" data-i="' + i + '">Take out</button></td></tr>').join('') ||
+        '<tr><td colspan="6" class="muted" style="text-align:center;padding:30px">No stock received yet.</td></tr>') + '</tbody></table></div></div>';
   } else {
     const f = S.ui.recvFilter, Q = S.ui.recvQ.trim().toUpperCase();
     let rs = S.receipts.slice().sort((a, b) => (b.receivedAt || '').localeCompare(a.receivedAt || ''));
@@ -751,7 +854,8 @@ function viewRecv(){
         const jb = r.type === 'stock' ? '<span class="tag stock">stock</span>' + (r.allocatedJob ? ' → ' + esc(r.allocatedJob) : '') : esc(r.jobNo || '');
         const known = r.type === 'stock' || S.jobs.some(j => Model.sameJob(r.jobNo, j.jobNo));
         const stt = (r.matches || []).length ? '<span class="tag ok">matched</span>' : r.type === 'stock' ? '' : known ? '<span class="tag warn">unmatched</span>' : '<span class="tag">job not imported</span>';
-        return '<tr class="click" data-act="editRec" data-r="' + r.id + '"><td class="small">' + esc(when(r.receivedAt)) + '</td><td class="mono small">' + esc(r.code) + '</td><td>' + jb + '</td><td>' + esc(r.description) + '</td><td>' + esc(r.qty) + ' ' + esc(r.uom || '') + '</td><td>' + esc(r.bin || '') + '</td><td>' + stt + (r.labelPrinted ? '' : ' <span class="tag">no label</span>') + '</td></tr>';
+        const depleted = r.type === 'stock' && onHandQty(r) === 0;
+        return '<tr class="click" data-act="editRec" data-r="' + r.id + '"><td class="small">' + esc(when(r.receivedAt)) + '</td><td class="mono small">' + esc(r.code) + '</td><td>' + jb + '</td><td>' + esc(r.description) + '</td><td>' + (r.type === 'stock' ? onHandHtml(r) : esc(r.qty) + ' ' + esc(r.uom || '')) + '</td><td>' + esc(r.bin || '') + '</td><td>' + stt + (r.labelPrinted ? '' : ' <span class="tag">no label</span>') + (depleted ? ' <span class="tag warn">depleted</span>' : '') + '</td></tr>';
       }).join('') || '<tr><td colspan="7" class="muted" style="text-align:center;padding:30px">Nothing received yet.</td></tr>') + '</tbody></table></div>';
   }
   return h + '</div></div>';
@@ -796,8 +900,12 @@ function editRec(r){
     '<div class="two"><label>Packing slip #<input data-rf="slip" value="' + esc(r.slip || '') + '"></label><label>Location / bin<input data-rf="bin" list="dlBins2" value="' + esc(r.bin || '') + '"></label></div><datalist id="dlBins2">' + binOptions() + '</datalist>' +
     '<label>Notes<textarea data-rf="note">' + esc(r.note || '') + '</textarea></label></div>' +
     (r.type === 'stock' ? '<p class="small"><b>Job:</b> ' + (r.allocatedJob ? esc(r.allocatedJob) : '<span class="muted">not associated yet</span>') + '</p>' : '') +
+    (r.type === 'stock' ? '<p class="small"><b>On hand:</b> ' + onHandHtml(r) + '</p>' : '') +
     (ms.length ? '<p class="small"><b>Matched to:</b> ' + ms.map(x => esc(x.list.groupKey) + ' #' + esc(x.line.n) + ' ' + esc(x.line.p)).join(', ') + '</p>' : '') +
+    (r.type === 'stock' && (r.withdrawals || []).length ? '<h3 class="small muted" style="margin-top:10px">TAKEN OUT</h3><div class="opts">' +
+      r.withdrawals.slice().sort((a, b) => (b.at || '').localeCompare(a.at || '')).map(w => '<div class="opt" style="cursor:default"><span>' + esc(w.qty) + ' ' + esc(r.uom || 'EA') + (w.by ? ' · ' + esc(w.by) : '') + (w.note ? ' · ' + esc(w.note) : '') + '<br><span class="small muted">' + esc(when(w.at)) + '</span></span></div>').join('') + '</div>' : '') +
     '<div class="row" style="margin-top:12px"><button class="btn danger" data-e="del">Delete</button><span class="sp"></span>' +
+    (r.type === 'stock' ? '<button class="btn" data-e="take">Take out of stock</button>' : '') +
     (r.type === 'stock' ? '<button class="btn" data-e="assign">' + (r.allocatedJob ? 'Change job' : 'Associate with job') + '</button>' : '') +
     (j ? '<button class="btn" data-e="match">Match to line</button>' : '') +
     '<button class="btn" data-e="label">Print label</button><button class="btn dark" data-e="save">Save</button></div>');
@@ -809,6 +917,7 @@ function editRec(r){
     else if(act === 'label'){ collect(); await saveReceipt(r); closeSheet(); printLabel(r); }
     else if(act === 'match'){ collect(); await saveReceipt(r); matchFromReceipt(r, j); }
     else if(act === 'assign'){ collect(); await saveReceipt(r); pickJobForStock(r); }
+    else if(act === 'take'){ collect(); await saveReceipt(r); takeStockSheet(r); }
     else if(act === 'del'){
       closeSheet();
       if(!(await askPin('Delete received item ' + r.code))) return;
@@ -1786,6 +1895,7 @@ const A = {
   recvFilter: b => { S.ui.recvFilter = b.dataset.k; render(); },
   recvView: b => { S.ui.recvView = b.dataset.k; render(); },
   stockGroup: b => stockGroupDetail(+b.dataset.i),
+  takeStockGroup: b => takeStockGroupSheet(+b.dataset.i),
   saveRecv: b => saveRecv(b.dataset.print === '1'),
   photo: () => { $('#filePhoto').value = ''; $('#filePhoto').click(); },
   dropPhoto: () => { S.ui.draftPhoto = null; keepForm(render); },
