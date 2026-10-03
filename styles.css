@@ -152,6 +152,8 @@ td.del button{border:0;background:transparent;color:var(--red);font-size:18px;cu
 .tag.warn{background:#fdecc8;color:#8a5a00}
 .tag.stock{background:#dde9f2;color:var(--blue)}
 .tag.red{background:var(--bofill);color:var(--red)}
+button.tag{all:unset;display:inline-block;font:700 10.5px/1 Arial,sans-serif;letter-spacing:.05em;text-transform:uppercase;padding:4px 6px;border-radius:3px;background:#eceee9;color:var(--ink2);cursor:pointer}
+button.tag:active{opacity:.75}
 .links{margin-top:6px;display:flex;flex-direction:column;gap:4px}
 .link{display:flex;align-items:center;gap:6px;font-size:12px;background:#f3f5f2;border-radius:5px;padding:4px 6px}
 .link .x{margin-left:auto;border:0;background:transparent;color:var(--red);cursor:pointer;font-size:15px}

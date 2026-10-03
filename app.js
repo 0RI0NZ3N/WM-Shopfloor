@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v12';
+const APP_VERSION = 'v13';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -55,7 +55,7 @@ const S = {
   set: { staff: ['M.I', 'Y.S', 'N.P', 'Z.M'], pin: '', openTabs: [], label: { w: 2, h: 1, dpi: 203 }, bins: [],
     shipFrom: ['1149 Pioneer Rd, Burlington, ON', '3230 Mainway, Burlington, ON'] },
   view: { name: 'dash' },
-  ui: { dashFilter: 'active', dashSort: 'ship', dashQ: '', listFilter: {}, recvFilter: 'all', recvQ: '', editLines: {}, recvType: 'job', draftPhoto: null, lastRecv: {}, spoolQ: '', spoolFilter: 'all' }
+  ui: { dashFilter: 'active', dashSort: 'ship', dashQ: '', listFilter: {}, recvFilter: 'all', recvQ: '', recvView: 'stock', editLines: {}, recvType: 'job', draftPhoto: null, lastRecv: {}, spoolQ: '', spoolFilter: 'all' }
 };
 /* ---- spool / reel length units ---- */
 const SPOOL_UNITS = [['ft', 'ft'], ['in', 'in'], ['yd', 'yd'], ['m', 'm'], ['cm', 'cm']];
@@ -157,7 +157,43 @@ function normalizeDateStr(s){
 // in. So shipping info lives in list.shipments[], not flat on the list.
 function newShipment(overrides){
   return Object.assign({ id: uid(), label: '', shipDate: '', weightKg: '', skidCount: '', shipFrom: '', contactName: '', contactPhone: '',
-    bookedCarrier: '', bookedRate: '', bookedBol: '', lastRfqEmail: '', rfqLog: [], shippedAt: null }, overrides || {});
+    bookedCarrier: '', bookedRate: '', bookedBol: '', bolFile: null, lastRfqEmail: '', rfqLog: [], shippedAt: null }, overrides || {});
+}
+// All shipments across every list on a job, in one flat list - used for the
+// per-job shipment count badge and the combined shipments sheet, since
+// shipments themselves live per-list (a job's cars can ship separately).
+function jobShipmentsAll(j){
+  const out = [];
+  for(const l of listsOf(j.id)) for(const sp of (l.shipments || [])) out.push({ l, sp });
+  return out.sort((a, b) => (a.sp.shipDate || '9999-99-99').localeCompare(b.sp.shipDate || '9999-99-99'));
+}
+function jobShipStats(j){
+  const all = jobShipmentsAll(j);
+  const shipped = all.filter(x => x.sp.shippedAt).length;
+  return { total: all.length, shipped, pending: all.length - shipped };
+}
+function openJobShipments(j){
+  const rows = jobShipmentsAll(j);
+  openSheet('<h2>Shipments — ' + esc(j.jobNo) + '</h2>' +
+    (rows.length ? '<div class="opts">' + rows.map(({ l, sp }) => {
+      const badge = sp.shippedAt ? '<span class="tag ok">Shipped</span>' : (sp.shipDate ? shipBadge(sp.shipDate) : '<span class="tag">No date</span>');
+      return '<button class="opt" data-l="' + l.id + '" data-sp="' + sp.id + '"><span><b>' + esc(l.groupKey === 'X' ? (l.title || 'LIST') : l.groupKey) + (l.carNo ? ' · CAR ' + esc(l.carNo) : '') + '</b> — ' + esc(sp.label || 'Shipment') + (sp.shipDate ? ' · ' + esc(fmtDateLong(sp.shipDate)) : '') + (sp.bookedCarrier ? ' · ' + esc(sp.bookedCarrier) : '') + (sp.bolFile ? ' · BOL on file' : '') + '</span><span class="sc">' + badge + '</span></button>';
+    }).join('') + '</div>' : '<p class="muted">No shipments scheduled yet on any list for this job.</p>') +
+    '<div class="row" style="margin-top:10px"><span class="sp"></span><button class="btn" data-sp="__x">Close</button></div>');
+  $('#sheet').onclick = e => {
+    const row = e.target.closest('[data-l]');
+    if(row){ const l = S.lists.find(x => x.id === row.dataset.l); const sp = l && l.shipments.find(x => x.id === row.dataset.sp); if(l && sp) editShipment(l, j, sp); return; }
+    if(e.target.closest('[data-sp="__x"]')) closeSheet();
+  };
+}
+function fmtBytes(n){
+  n = +n || 0;
+  if(n < 1024) return n + ' B';
+  if(n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+  return (n / 1024 / 1024).toFixed(1) + ' MB';
+}
+function readAsDataUrl(file){
+  return new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(file); });
 }
 function pendingShipments(l){
   return (l.shipments || []).filter(sp => !sp.shippedAt).sort((a, b) => (a.shipDate || '9999-99-99').localeCompare(b.shipDate || '9999-99-99'));
@@ -282,7 +318,7 @@ function openJobTab(jobId, listId){
 function renderTabs(){
   const v = S.view;
   let h = '<button class="tab' + (v.name === 'dash' ? ' on' : '') + '" data-act="goDash">Dashboard</button>' +
-    '<button class="tab' + (v.name === 'recv' ? ' on' : '') + '" data-act="goRecv">Receiving</button>' +
+    '<button class="tab' + (v.name === 'recv' ? ' on' : '') + '" data-act="goRecv">Inventory</button>' +
     '<button class="tab' + (v.name === 'spools' ? ' on' : '') + '" data-act="goSpools">Spools</button>';
   S.set.openTabs = S.set.openTabs.filter(id => job(id));
   for(const id of S.set.openTabs){
@@ -345,11 +381,13 @@ function viewDash(){
   const cardHtml = (j, s, i) => {
     const w = x => (s.total ? x / s.total * 100 : 0).toFixed(1) + '%';
     const ship = jobNextShip(j);
+    const shipStats = jobShipStats(j);
     return '<div class="jcard" data-act="goJob" data-id="' + esc(j.id) + '"><span class="rank">#' + (i + 1) + '</span>' +
       '<div><div class="jn">' + esc(j.jobNo) + (j.status === 'closed' ? ' <span class="tag">closed</span>' : '') + '</div><div class="muted">' + esc(j.jobName || '') + (j.customer ? ' · ' + esc(j.customer) : '') + '</div></div>' +
       '<div class="row"><span class="big">' + pct(s.pct) + '</span><span class="muted small">' + s.done + ' of ' + s.total + ' lines done</span></div>' +
       '<div class="bar"><i class="d" style="width:' + w(s.done) + '"></i><i class="p" style="width:' + w(s.partial) + '"></i><i class="b" style="width:' + w(s.bo) + '"></i></div>' +
-      '<div class="lchips">' + s.lists.map(x => '<span class="lchip" style="background:' + gColor(x.list.groupKey) + ';color:' + gInk(x.list.groupKey) + '">' + esc(x.list.groupKey === 'X' ? x.list.title : x.list.groupKey) + (x.list.carNo ? ' · ' + esc(x.list.carNo) : '') + ' ' + pct(x.s.pct) + '</span>').join('') + (ship ? ' ' + shipBadge(ship) : '') + '</div>' +
+      '<div class="lchips">' + s.lists.map(x => '<span class="lchip" style="background:' + gColor(x.list.groupKey) + ';color:' + gInk(x.list.groupKey) + '">' + esc(x.list.groupKey === 'X' ? x.list.title : x.list.groupKey) + (x.list.carNo ? ' · ' + esc(x.list.carNo) : '') + ' ' + pct(x.s.pct) + '</span>').join('') + (ship ? ' ' + shipBadge(ship) : '') +
+      (shipStats.total ? ' <button class="tag click" data-act="jobShipments" data-id="' + esc(j.id) + '">' + shipStats.shipped + '/' + shipStats.total + ' shipped</button>' : '') + '</div>' +
       '<div class="meta"><span>B/O lines <b style="color:' + (s.bo ? 'var(--red)' : 'inherit') + '">' + s.bo + '</b></span><span>Material <b>' + s.recv + '</b>' + (s.unmatched ? ' (<b>' + s.unmatched + '</b> unmatched)' : '') + '</span><span>' + rel(s.last) + '</span></div></div>';
   };
   let i = 0;
@@ -370,7 +408,9 @@ function viewJob(){
     '<div class="kv"><span>Job name</span><b>' + esc(j.jobName || '—') + '</b><span>Customer</span><b>' + esc(j.customer || '—') + '</b>' +
     (j.shipAddr ? '<span>Ship to</span><b>' + esc(j.shipAddr).replace(/\n/g, ', ') + '</b>' : '') + '</div></div>' +
     '<div class="jpct"><b>' + pct(s.pct) + '</b><div class="muted small">' + s.done + '/' + s.total + ' lines done · ' + s.bo + ' on B/O' + (jobNextShip(j) ? ' · next ship ' + esc(fmtDateLong(jobNextShip(j))) + ' ' + shipBadge(jobNextShip(j)) : '') + '</div>' +
-    '<div class="row" style="justify-content:flex-end;margin-top:8px"><button class="btn sm" data-act="printJob">Print job report</button><button class="btn sm" data-act="jobInfo">Job info</button></div></div></div>';
+    '<div class="row" style="justify-content:flex-end;margin-top:8px">' +
+    (jobShipStats(j).total ? '<button class="btn sm" data-act="jobShipments" data-id="' + esc(j.id) + '">Shipments (' + jobShipStats(j).shipped + '/' + jobShipStats(j).total + ' shipped)</button>' : '') +
+    '<button class="btn sm" data-act="printJob">Print job report</button><button class="btn sm" data-act="jobInfo">Job info</button></div></div></div>';
   h += '<div class="subtabs">' + ls.map(l => {
     const st = Model.listStats(l);
     return '<button class="subtab' + (sub === l.id ? ' on' : '') + '" data-act="sub" data-k="' + l.id + '"><span class="sw" style="background:' + gColor(l.groupKey) + '"></span>' +
@@ -619,7 +659,7 @@ function viewMaterial(j, recs){
   let h = '<div class="ltool"><h2>Received material for ' + esc(j.jobNo) + '</h2><span class="sp"></span>' +
     '<button class="btn sm" data-act="recvForJob">+ Receive for this job</button><button class="btn sm" data-act="stockForJob">Allocate from stock</button></div>' +
     '<p class="muted small">Everything received against this job number shows here. Nothing is matched automatically — tap <b>Match to line</b> and choose the product list line it belongs to.</p>';
-  if(!recs.length && !sps.length) return h + '<div class="empty"><h2>Nothing received yet</h2><p>Receive material in the Receiving tab with job # ' + esc(j.jobNo) + ', or import the move app file.</p></div>';
+  if(!recs.length && !sps.length) return h + '<div class="empty"><h2>Nothing received yet</h2><p>Receive material in the Inventory tab with job # ' + esc(j.jobNo) + ', or import the move app file.</p></div>';
   if(sps.length) h += '<h3>Spooled material (' + sps.length + ')</h3><div class="recs">' + sps.map(sp => spoolMatCard(sp)).join('') + '</div>';
   if(un.length) h += '<h3 style="margin-top:16px">Unmatched (' + un.length + ')</h3><div class="recs">' + un.map(r => recCard(r, j)).join('') + '</div>';
   if(m.length) h += '<h3 style="margin-top:16px">Matched (' + m.length + ')</h3><div class="recs">' + m.map(r => recCard(r, j)).join('') + '</div>';
@@ -632,10 +672,49 @@ function binOptions(){
   for(const r of S.receipts) if(r.bin) seen.add(r.bin);
   return [...seen].map(b => '<option value="' + esc(b) + '">').join('');
 }
+// Groups stock (non-job) receipts by description + bin so the Inventory tab
+// can show what's actually on the shelf instead of a flat log. No
+// consumption tracking - this is everything ever logged as stock, under
+// that description/bin, by design (Zein's call: keep this simple).
+function stockGroups(){
+  const map = new Map();
+  for(const r of S.receipts){
+    if(r.type !== 'stock') continue;
+    const descKey = (r.description || '').trim().toUpperCase() || '(NO DESCRIPTION)';
+    const binKey = (r.bin || '').trim().toUpperCase() || 'NO BIN';
+    const key = descKey + '|' + binKey;
+    if(!map.has(key)) map.set(key, { description: r.description || '(no description)', bin: r.bin || '', uomTotals: {}, receipts: [], anyAllocated: false });
+    const g = map.get(key);
+    g.receipts.push(r);
+    const uom = r.uom || 'EA';
+    const q = parseFloat(r.qty);
+    g.uomTotals[uom] = (g.uomTotals[uom] || 0) + (isNaN(q) ? 0 : q);
+    if(r.allocatedJob) g.anyAllocated = true;
+  }
+  return [...map.values()].sort((a, b) => a.description.localeCompare(b.description) || a.bin.localeCompare(b.bin));
+}
+let STOCK_GROUPS = [];
+function stockGroupQtyHtml(g){
+  const parts = Object.entries(g.uomTotals).filter(([, n]) => n > 0).map(([u, n]) => (Math.round(n * 100) / 100) + ' ' + u);
+  return parts.length ? parts.join(', ') : g.receipts.length + ' item' + (g.receipts.length > 1 ? 's' : '');
+}
+function stockGroupDetail(i){
+  const g = STOCK_GROUPS[i]; if(!g) return;
+  openSheet('<h2>' + esc(g.description) + '</h2><div class="muted small">Bin ' + esc(g.bin || '—') + ' · ' + stockGroupQtyHtml(g) + ' on hand · ' + g.receipts.length + ' receipt' + (g.receipts.length > 1 ? 's' : '') + '</div>' +
+    '<div class="opts" style="margin-top:10px">' + g.receipts.slice().sort((a, b) => (b.receivedAt || '').localeCompare(a.receivedAt || '')).map(r =>
+      '<button class="opt" data-r="' + r.id + '"><span><b class="mono">' + esc(r.code) + '</b> ' + esc(r.qty) + ' ' + esc(r.uom || 'EA') + '<br><span class="small muted">' + esc(when(r.receivedAt)) + (r.allocatedJob ? ' · → ' + esc(r.allocatedJob) : '') + '</span></span></button>'
+    ).join('') + '</div>' +
+    '<div class="row" style="margin-top:10px"><span class="sp"></span><button class="btn" data-r="__x">Close</button></div>');
+  $('#sheet').onclick = e => {
+    const b = e.target.closest('[data-r]'); if(!b) return;
+    if(b.dataset.r === '__x') return closeSheet();
+    editRec(S.receipts.find(x => x.id === b.dataset.r));
+  };
+}
 function viewRecv(){
   const d = S.ui.lastRecv;
   const t = S.ui.recvType;
-  let h = '<div class="row" style="margin-bottom:12px"><h1>Receiving</h1><span class="sp"></span>' +
+  let h = '<div class="row" style="margin-bottom:12px"><h1>Inventory</h1><span class="sp"></span>' +
     '<button class="btn" data-act="scanLabel">Scan label</button>' +
     '<button class="btn" data-act="importMove" title="Accepts the move app\'s JSON/CSV export, or its Print / Save PDF list export">Import move app file</button></div><div class="recvgrid">';
   h += '<div class="card"><h2>Receive material</h2><div class="form" style="margin-top:10px" id="recvForm">' +
@@ -651,21 +730,31 @@ function viewRecv(){
     '<div class="row"><button class="btn dark" data-act="saveRecv" data-print="0">Save</button><button class="btn primary" data-act="saveRecv" data-print="1">Save &amp; print label</button></div>' +
     '<p class="muted small">Job, supplier, PO, slip and bin stay filled for the next item from the same delivery.</p></div></div>';
   // list
-  const f = S.ui.recvFilter, Q = S.ui.recvQ.trim().toUpperCase();
-  let rs = S.receipts.slice().sort((a, b) => (b.receivedAt || '').localeCompare(a.receivedAt || ''));
-  rs = rs.filter(r => f === 'all' || (f === 'job' && r.type !== 'stock') || (f === 'stock' && r.type === 'stock') || (f === 'un' && r.type !== 'stock' && !(r.matches || []).length) || (f === 'np' && !r.labelPrinted));
-  if(Q) rs = rs.filter(r => [r.code, r.jobNo, r.description, r.bin, r.supplier, r.po, r.partNo, r.slip].join(' ').toUpperCase().includes(Q));
-  const cnt = k => S.receipts.filter(r => k === 'all' || (k === 'job' && r.type !== 'stock') || (k === 'stock' && r.type === 'stock') || (k === 'un' && r.type !== 'stock' && !(r.matches || []).length) || (k === 'np' && !r.labelPrinted)).length;
-  h += '<div><div class="row" style="margin-bottom:8px"><input class="search" placeholder="Search code, job, description, bin, PO" data-in="recvQ" value="' + esc(S.ui.recvQ) + '"><div class="chips">' +
-    [['all', 'All'], ['job', 'Job'], ['stock', 'Stock'], ['un', 'Unmatched'], ['np', 'No label']].map(([k, t2]) => '<button class="chip' + (f === k ? ' on' : '') + '" data-act="recvFilter" data-k="' + k + '">' + t2 + ' <b>' + cnt(k) + '</b></button>').join('') + '</div></div>' +
-    '<div class="card" style="padding:0;overflow:auto;max-height:calc(100vh - 210px)"><table class="list"><thead><tr><th>Received</th><th>Code</th><th>Job</th><th>Description</th><th>Qty</th><th>Bin</th><th>Status</th></tr></thead><tbody>' +
-    (rs.slice(0, 400).map(r => {
-      const jb = r.type === 'stock' ? '<span class="tag stock">stock</span>' + (r.allocatedJob ? ' → ' + esc(r.allocatedJob) : '') : esc(r.jobNo || '');
-      const known = r.type === 'stock' || S.jobs.some(j => Model.sameJob(r.jobNo, j.jobNo));
-      const stt = (r.matches || []).length ? '<span class="tag ok">matched</span>' : r.type === 'stock' ? '' : known ? '<span class="tag warn">unmatched</span>' : '<span class="tag">job not imported</span>';
-      return '<tr class="click" data-act="editRec" data-r="' + r.id + '"><td class="small">' + esc(when(r.receivedAt)) + '</td><td class="mono small">' + esc(r.code) + '</td><td>' + jb + '</td><td>' + esc(r.description) + '</td><td>' + esc(r.qty) + ' ' + esc(r.uom || '') + '</td><td>' + esc(r.bin || '') + '</td><td>' + stt + (r.labelPrinted ? '' : ' <span class="tag">no label</span>') + '</td></tr>';
-    }).join('') || '<tr><td colspan="7" class="muted" style="text-align:center;padding:30px">Nothing received yet.</td></tr>') + '</tbody></table></div></div>';
-  return h + '</div>';
+  const view = S.ui.recvView;
+  h += '<div><div class="row" style="margin-bottom:8px"><h2 style="margin:0">' + (view === 'stock' ? 'Stock on hand' : 'All receipts') + '</h2><span class="sp"></span><div class="chips">' +
+    [['stock', 'Stock on hand'], ['log', 'All receipts']].map(([k, t2]) => '<button class="chip' + (view === k ? ' on' : '') + '" data-act="recvView" data-k="' + k + '">' + t2 + '</button>').join('') + '</div></div>';
+  if(view === 'stock'){
+    STOCK_GROUPS = stockGroups();
+    h += '<div class="card" style="padding:0;overflow:auto;max-height:calc(100vh - 210px)"><table class="list"><thead><tr><th>Description</th><th>Bin</th><th>On hand</th><th>Receipts</th><th></th></tr></thead><tbody>' +
+      (STOCK_GROUPS.map((g, i) => '<tr class="click" data-act="stockGroup" data-i="' + i + '"><td>' + esc(g.description) + '</td><td>' + esc(g.bin || '—') + '</td><td>' + esc(stockGroupQtyHtml(g)) + '</td><td>' + g.receipts.length + '</td><td>' + (g.anyAllocated ? '<span class="tag stock">earmarked</span>' : '') + '</td></tr>').join('') ||
+        '<tr><td colspan="5" class="muted" style="text-align:center;padding:30px">No stock received yet.</td></tr>') + '</tbody></table></div></div>';
+  } else {
+    const f = S.ui.recvFilter, Q = S.ui.recvQ.trim().toUpperCase();
+    let rs = S.receipts.slice().sort((a, b) => (b.receivedAt || '').localeCompare(a.receivedAt || ''));
+    rs = rs.filter(r => f === 'all' || (f === 'job' && r.type !== 'stock') || (f === 'stock' && r.type === 'stock') || (f === 'un' && r.type !== 'stock' && !(r.matches || []).length) || (f === 'np' && !r.labelPrinted));
+    if(Q) rs = rs.filter(r => [r.code, r.jobNo, r.description, r.bin, r.supplier, r.po, r.partNo, r.slip].join(' ').toUpperCase().includes(Q));
+    const cnt = k => S.receipts.filter(r => k === 'all' || (k === 'job' && r.type !== 'stock') || (k === 'stock' && r.type === 'stock') || (k === 'un' && r.type !== 'stock' && !(r.matches || []).length) || (k === 'np' && !r.labelPrinted)).length;
+    h += '<div class="row" style="margin-bottom:8px"><input class="search" placeholder="Search code, job, description, bin, PO" data-in="recvQ" value="' + esc(S.ui.recvQ) + '"><div class="chips">' +
+      [['all', 'All'], ['job', 'Job'], ['stock', 'Stock'], ['un', 'Unmatched'], ['np', 'No label']].map(([k, t2]) => '<button class="chip' + (f === k ? ' on' : '') + '" data-act="recvFilter" data-k="' + k + '">' + t2 + ' <b>' + cnt(k) + '</b></button>').join('') + '</div></div>' +
+      '<div class="card" style="padding:0;overflow:auto;max-height:calc(100vh - 210px)"><table class="list"><thead><tr><th>Received</th><th>Code</th><th>Job</th><th>Description</th><th>Qty</th><th>Bin</th><th>Status</th></tr></thead><tbody>' +
+      (rs.slice(0, 400).map(r => {
+        const jb = r.type === 'stock' ? '<span class="tag stock">stock</span>' + (r.allocatedJob ? ' → ' + esc(r.allocatedJob) : '') : esc(r.jobNo || '');
+        const known = r.type === 'stock' || S.jobs.some(j => Model.sameJob(r.jobNo, j.jobNo));
+        const stt = (r.matches || []).length ? '<span class="tag ok">matched</span>' : r.type === 'stock' ? '' : known ? '<span class="tag warn">unmatched</span>' : '<span class="tag">job not imported</span>';
+        return '<tr class="click" data-act="editRec" data-r="' + r.id + '"><td class="small">' + esc(when(r.receivedAt)) + '</td><td class="mono small">' + esc(r.code) + '</td><td>' + jb + '</td><td>' + esc(r.description) + '</td><td>' + esc(r.qty) + ' ' + esc(r.uom || '') + '</td><td>' + esc(r.bin || '') + '</td><td>' + stt + (r.labelPrinted ? '' : ' <span class="tag">no label</span>') + '</td></tr>';
+      }).join('') || '<tr><td colspan="7" class="muted" style="text-align:center;padding:30px">Nothing received yet.</td></tr>') + '</tbody></table></div>';
+  }
+  return h + '</div></div>';
 }
 async function saveRecv(print){
   const g = id => ($('#' + id) || {}).value || '';
@@ -1077,7 +1166,7 @@ async function backupExport(){
 async function backupImport(file){
   let d;
   try{ d = JSON.parse(await file.text()); }catch(e){ return toast('Not a backup file', true); }
-  if(d.app !== 'meii-shopfloor') return toast('That file is not a Shop Floor backup (for move app files use Receiving → Import move app file)', true);
+  if(d.app !== 'meii-shopfloor') return toast('That file is not a Shop Floor backup (for move app files use Inventory → Import move app file)', true);
   if(!(await askPin('Restore a backup'))) return;
   openSheet('<h2>Restore backup</h2><p>' + (d.jobs || []).length + ' jobs, ' + (d.lists || []).length + ' lists, ' + (d.receipts || []).length + ' received items, ' + (d.spools || []).length + ' spools from ' + esc(when(d.exportedAt)) + '.</p>' +
     '<p class="small muted"><b>Merge</b> keeps what is on this tablet and takes the newer copy of anything in both. <b>Replace</b> wipes this tablet first.</p>' +
@@ -1320,6 +1409,12 @@ function editShipment(l, j, sp){
     '<div class="two"><label>Carrier<input data-sf="bookedCarrier" value="' + esc(sp.bookedCarrier || '') + '"></label>' +
     '<label>Rate ($ CAD)<input data-sf="bookedRate" inputmode="decimal" value="' + esc(sp.bookedRate || '') + '"></label></div>' +
     '<label>BOL / PRO #<input data-sf="bookedBol" value="' + esc(sp.bookedBol || '') + '"></label></div>' +
+    '<h3 class="small muted" style="margin-top:14px">BILL OF LADING</h3>' +
+    (sp.bolFile ?
+      '<div class="row" style="align-items:center;flex-wrap:wrap;gap:8px"><span class="small">' + esc(sp.bolFile.name) + ' · ' + fmtBytes(sp.bolFile.size) + '</span><span class="sp"></span>' +
+      '<a class="btn sm" href="' + sp.bolFile.dataUrl + '" target="_blank" rel="noopener" download="' + esc(sp.bolFile.name) + '">View</a>' +
+      '<button class="btn sm danger" data-g="bolDel">Remove</button></div>'
+      : '<div class="row"><button class="btn" data-g="bol">Attach BOL (photo or PDF)</button></div>') +
     '<h3 class="small muted" style="margin-top:14px">REQUEST A QUOTE</h3><div class="form">' +
     '<label>Carrier email<input id="rfqEmail" value="' + esc(sp.lastRfqEmail || '') + '" placeholder="dispatch@carrier.com" autocomplete="off"></label></div>' +
     '<div class="row" style="margin-top:4px"><span class="sp"></span><button class="btn" data-g="rfq">Email RFQ</button></div>' +
@@ -1345,6 +1440,16 @@ function editShipment(l, j, sp){
       const email = ($('#rfqEmail').value || '').trim();
       if(!email) return toast('Enter a carrier email first', true);
       await sendRfq(l, j, sp, email);
+      editShipment(l, j, sp);
+    } else if(b.dataset.g === 'bol'){
+      collect();
+      BOL_TARGET = { l, j, sp };
+      $('#fileBol').value = '';
+      $('#fileBol').click();
+    } else if(b.dataset.g === 'bolDel'){
+      collect();
+      sp.bolFile = null;
+      await saveList(l);
       editShipment(l, j, sp);
     }
   };
@@ -1389,7 +1494,7 @@ function jobInfo(){
       else if(g === 'del'){
         closeSheet();
         if(!(await askPin('Delete job ' + j.jobNo))) return;
-        if(!(await confirmSheet('Delete job ' + j.jobNo + '?', 'Deletes its product lists and sign-offs. Received material stays in Receiving (unmatched).', 'Delete job', true))) return;
+        if(!(await confirmSheet('Delete job ' + j.jobNo + '?', 'Deletes its product lists and sign-offs. Received material stays in Inventory (unmatched).', 'Delete job', true))) return;
         for(const l of listsOf(j.id)){ await DB.del('lists', l.id); await DB.del('pdfs', l.id); }
         const ids = new Set(listsOf(j.id).map(l => l.id));
         S.lists = S.lists.filter(l => l.jobId !== j.id);
@@ -1627,12 +1732,13 @@ const A = {
   delList: async () => {
     const l = curList();
     if(!(await askPin('Delete list ' + l.title))) return;
-    if(!(await confirmSheet('Delete ' + l.title + '?', 'All sign-offs on this list are lost. Received material stays in Receiving.', 'Delete list', true))) return;
+    if(!(await confirmSheet('Delete ' + l.title + '?', 'All sign-offs on this list are lost. Received material stays in Inventory.', 'Delete list', true))) return;
     S.lists = S.lists.filter(x => x !== l); await DB.del('lists', l.id); await DB.del('pdfs', l.id);
     for(const r of S.receipts) if((r.matches || []).some(m => m.listId === l.id)){ r.matches = r.matches.filter(m => m.listId !== l.id); await saveReceipt(r); }
     S.view.sub = null; render();
   },
   listShip: () => listShip(),
+  jobShipments: b => openJobShipments(job(b.dataset.id)),
   listInfo: () => {
     const l = curList(); l.sig = l.sig || {}; l.orderType = l.orderType || {};
     openSheet('<h2>Signatures &amp; order type</h2><div class="form" id="sigf"><div class="chips">' + ['warranty', 'chargeable', 'rma', 'stock'].map(k => '<label class="chip"><input type="checkbox" data-ot="' + k + '"' + (l.orderType[k] ? ' checked' : '') + '> ' + k.toUpperCase() + '</label>').join('') + '</div>' +
@@ -1678,6 +1784,8 @@ const A = {
   stockForJob: () => stockForJob(job(S.view.jobId)),
   recvType: b => { S.ui.recvType = b.dataset.k; keepForm(render); },
   recvFilter: b => { S.ui.recvFilter = b.dataset.k; render(); },
+  recvView: b => { S.ui.recvView = b.dataset.k; render(); },
+  stockGroup: b => stockGroupDetail(+b.dataset.i),
   saveRecv: b => saveRecv(b.dataset.print === '1'),
   photo: () => { $('#filePhoto').value = ''; $('#filePhoto').click(); },
   dropPhoto: () => { S.ui.draftPhoto = null; keepForm(render); },
@@ -1710,6 +1818,7 @@ const A = {
   }
 };
 let IMP_TARGET = null;
+let BOL_TARGET = null;
 // keep typed-but-unsaved receiving form values across a re-render
 function keepForm(fn){
   const vals = {}; document.querySelectorAll('#recvForm [id]').forEach(i => { if('value' in i) vals[i.id] = i.value; });
@@ -1754,6 +1863,17 @@ $('#fileList').addEventListener('change', e => {
 });
 $('#fileMove').addEventListener('change', e => { const f = e.target.files[0]; if(f) importMove(f); });
 $('#fileBackup').addEventListener('change', e => { const f = e.target.files[0]; if(f) backupImport(f); });
+$('#fileBol').addEventListener('change', async e => {
+  const f = e.target.files[0]; const t = BOL_TARGET; BOL_TARGET = null;
+  if(!f || !t) return;
+  if(f.size > 10 * 1024 * 1024) return toast('That file is too large (max 10 MB)', true);
+  let dataUrl;
+  try{ dataUrl = await readAsDataUrl(f); }catch(err){ return toast('Could not read that file', true); }
+  t.sp.bolFile = { name: f.name, type: f.type || '', size: f.size, dataUrl, addedAt: nowIso() };
+  await saveList(t.l);
+  toast('BOL attached');
+  editShipment(t.l, t.j, t.sp);
+});
 $('#filePhoto').addEventListener('change', async e => {
   const f = e.target.files[0]; if(!f) return;
   S.ui.draftPhoto = await takePhoto(f);
