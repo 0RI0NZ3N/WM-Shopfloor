@@ -280,5 +280,102 @@ const Parse = (() => {
     return res;
   }
 
-  return { read, groupSuffix, lib };
+  /* ---------- laser cut list reader ---------- */
+  // A different ERP export entirely - flat rows of real part dimensions
+  // (no department stamps), used to work out sheet material needed. Columns:
+  // Group | Sub Group | Production | Product # | Description | QTY |
+  // Width (in) | Length (in) | Thick (in) | Gauge | Stock No. | Weight (lb) |
+  // Material | Material Finish | Notes
+  const LASER_COLS = [
+    ['group', /^group$/i], ['subGroup', /^sub\s*group$/i], ['production', /^production$/i],
+    ['productNo', /^product\s*#$/i], ['description', /^description$/i], ['qty', /^qty$/i],
+    ['width', /^width/i], ['length', /^length/i], ['thick', /^thick/i], ['gauge', /^gauge$/i],
+    ['stockNo', /^stock\s*no\.?$/i], ['weight', /^weight/i], ['material', /^material$/i],
+    ['finish', /^material\s*finish$/i], ['notes', /^notes$/i]
+  ];
+  function mergeRow(sorted, gap){
+    const merged = [];
+    for(const it of sorted){
+      const last = merged[merged.length - 1];
+      if(last && it.x - last.x1 < gap){ last.s = norm(last.s + ' ' + it.s); last.x1 = it.x1; last.xc = (last.x + last.x1) / 2; }
+      else merged.push({ ...it });
+    }
+    return merged;
+  }
+  function parseLaserPage(items){
+    const flat = items.filter(i => !i.rot);
+    const qtyH = flat.find(i => /^qty$/i.test(i.s));
+    if(!qtyH) return null;
+    const hdrRow = flat.filter(i => Math.abs(i.yc - qtyH.yc) < 4).sort((a, b) => a.x - b.x);
+    const hdrCells = mergeRow(hdrRow, 10);
+    const cols = [];
+    let ci = 0;
+    for(const cell of hdrCells){
+      while(ci < LASER_COLS.length && !LASER_COLS[ci][1].test(cell.s)) ci++;
+      if(ci >= LASER_COLS.length) break;
+      cols.push({ key: LASER_COLS[ci][0], xc: cell.xc });
+      ci++;
+    }
+    if(cols.length < 10) return null; // not a laser-list page
+    for(let k = 0; k < cols.length; k++){
+      cols[k].l = k ? (cols[k - 1].xc + cols[k].xc) / 2 : -Infinity;
+      cols[k].r = k < cols.length - 1 ? (cols[k].xc + cols[k + 1].xc) / 2 : Infinity;
+    }
+    const yHdr = qtyH.yc;
+    const anchors = flat.filter(i => i.yc < yHdr - 2 && /^group\s*\d+$/i.test(i.s)).sort((a, b) => b.yc - a.yc);
+    if(!anchors.length) return { header: {}, rows: [] };
+    const gaps = [];
+    for(let k = 1; k < anchors.length; k++) gaps.push(anchors[k - 1].yc - anchors[k].yc);
+    gaps.sort((a, b) => a - b);
+    const rowH = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 18;
+    const rows = [];
+    for(const a of anchors){
+      const top = a.yc + rowH / 2, bot = a.yc - rowH / 2;
+      const inRow = flat.filter(i => i.yc <= top && i.yc > bot);
+      const row = {};
+      for(const c of cols){
+        const v = norm(inRow.filter(i => i.xc >= c.l && i.xc < c.r).sort((x, y) => x.x - y.x).map(i => i.s).join(' '));
+        if(v) row[c.key] = v;
+      }
+      if(row.productNo || row.description) rows.push(row);
+    }
+    // header block (JOB NO / JOB NAME / BY / ELEVATOR NO / REV / TOTAL LINE ITEMS)
+    const above = flat.filter(i => i.yc > yHdr + 10);
+    const LBL = { jobNo: /^job\s*no:?$/i, jobName: /^job\s*name:?$/i, by: /^by:?$/i, elevatorNo: /^elevator\s*no:?$/i, rev: /^rev\.?:?$/i };
+    const header = {};
+    for(const [k, re] of Object.entries(LBL)){
+      const lab = above.find(i => re.test(i.s));
+      if(!lab) continue;
+      const rightLabels = above.filter(o => o !== lab && Object.values(LBL).some(r2 => r2.test(o.s)) && o.x > lab.x1 - 0.5).map(o => o.x);
+      const limit = rightLabels.length ? Math.min(...rightLabels) : Infinity;
+      const v = norm(above.filter(i => Math.abs(i.yc - lab.yc) < 4 && i.x >= lab.x1 - 0.5 && i.x < limit && i !== lab)
+        .sort((a, b) => a.x - b.x).map(i => i.s).join(' '));
+      header[k] = k === 'rev' ? (v.split(' ')[0] || '') : v;
+    }
+    const titleIt = above.filter(i => /LASER.*PART|PART.*LASER/i.test(i.s)).sort((a, b) => b.h - a.h)[0];
+    if(titleIt) header.title = titleIt.s.toUpperCase();
+    return { header, rows };
+  }
+
+  /* Main entry for a laser cut list: File -> { header, rows[] }. One PDF only
+     (no OCR fallback - this is always an ERP text-layer export). */
+  async function readLaser(file, onStatus){
+    const say = onStatus || (() => {});
+    const lp = await lib();
+    const buf = new Uint8Array(await file.arrayBuffer());
+    const pdfBytes = buf.slice();
+    const doc = await lp.getDocument({ data: buf.slice() }).promise;
+    const res = { header: {}, rows: [], pdfBytes };
+    for(let p = 1; p <= doc.numPages; p++){
+      const page = await doc.getPage(p);
+      say('Reading page ' + p + ' of ' + doc.numPages + '…');
+      const tp = parseLaserPage(textItems(await page.getTextContent()));
+      if(!tp) continue;
+      for(const k of Object.keys(tp.header)) if(tp.header[k] && !res.header[k]) res.header[k] = tp.header[k];
+      res.rows.push(...tp.rows);
+    }
+    return res;
+  }
+
+  return { read, readLaser, groupSuffix, lib };
 })();

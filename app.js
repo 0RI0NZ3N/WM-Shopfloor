@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v15';
+const APP_VERSION = 'v16';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -53,9 +53,9 @@ window.Model = Model;
 const S = {
   jobs: [], lists: [], receipts: [], spools: [],
   set: { staff: ['M.I', 'Y.S', 'N.P', 'Z.M'], pin: '', openTabs: [], label: { w: 2, h: 1, dpi: 203 }, bins: [],
-    shipFrom: ['1149 Pioneer Rd, Burlington, ON', '3230 Mainway, Burlington, ON'], contacts: [] },
+    shipFrom: ['1149 Pioneer Rd, Burlington, ON', '3230 Mainway, Burlington, ON'], contacts: [], role: 'wl' },
   view: { name: 'dash' },
-  ui: { dashFilter: 'active', dashSort: 'ship', dashQ: '', listFilter: {}, recvFilter: 'all', recvQ: '', recvView: 'stock', editLines: {}, recvType: 'job', draftPhoto: null, lastRecv: {}, spoolQ: '', spoolFilter: 'all' }
+  ui: { dashFilter: 'active', dashSort: 'ship', dashQ: '', listFilter: {}, recvFilter: 'all', recvQ: '', recvView: 'stock', editLines: {}, recvType: 'job', draftPhoto: null, lastRecv: {}, spoolQ: '', spoolFilter: 'all', recvUomSheet: false }
 };
 /* ---- spool / reel length units ---- */
 const SPOOL_UNITS = [['ft', 'ft'], ['in', 'in'], ['yd', 'yd'], ['m', 'm'], ['cm', 'cm']];
@@ -68,6 +68,54 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString
 const nowIso = () => new Date().toISOString();
 const pct = x => Math.round(x * 100) + '%';
 const ZONES = ['RECEIVING / HOLD', 'MISC / PROJECT STORAGE', 'BULK STORAGE', 'SHIPPING / STAGING', 'PRODUCTION'];
+// Two roles share this one app: "Warehousing & Logistics" is everything built
+// up to this point; "Laser" is a cut-down view for the laser operator - view
+// product lists + Inventory, sign off only the laser column, and work with
+// laser cut lists. isLaser() gates both the nav (render/renderTabs) and what
+// a product-list row lets you touch (rowHtml's laserOnly param).
+const ROLES = [['wl', 'Warehousing & Logistics'], ['laser', 'Laser']];
+const isLaser = () => S.set.role === 'laser';
+
+/* ---- laser cut lists: sheet-area math (all sheets are 48x96 = 4608 sq in) ---- */
+const SHEET_W = 48, SHEET_L = 96, SHEET_AREA = SHEET_W * SHEET_L;
+function sheetKeyOf(material, thick){
+  return (material || '').trim().toUpperCase().replace(/\s+/g, ' ') + '|' + (parseFloat(thick) || 0).toFixed(3);
+}
+function sheetDesc(material, thick){
+  return (material || '').trim().toUpperCase() + ' ' + (parseFloat(thick) || 0).toFixed(3) + '" SHEET (' + SHEET_W + 'x' + SHEET_L + ')';
+}
+// One row per material+thickness combo found on the cut list: how much area
+// it all adds up to, how many whole 48x96 sheets that naively takes (no real
+// nesting - just total area / sheet area, rounded up), and what's left over
+// on the last sheet once rounded. Deliberately rough, per the ask.
+function computeSheetGroups(items){
+  const groups = {};
+  for(const it of items){
+    const area = (parseFloat(it.width) || 0) * (parseFloat(it.length) || 0);
+    it.area = area;
+    const key = it.sheetKey = sheetKeyOf(it.material, it.thick);
+    if(!groups[key]) groups[key] = { key, material: (it.material || '').trim().toUpperCase(), thick: parseFloat(it.thick) || 0, totalArea: 0, parts: [] };
+    groups[key].totalArea += area * (parseFloat(it.qty) || 0);
+    groups[key].parts.push(it);
+  }
+  return Object.values(groups).map(g => {
+    g.sheetsNeeded = g.totalArea ? Math.ceil(g.totalArea / SHEET_AREA) : 0;
+    g.leftoverArea = g.sheetsNeeded ? g.sheetsNeeded * SHEET_AREA - g.totalArea : 0;
+    return g;
+  }).sort((a, b) => b.totalArea - a.totalArea);
+}
+// A rough drop-piece hint, scoped to this one cut list (so it never suggests
+// using one job's offcut on another job's part): once a sheet type is
+// rounded up to a whole sheet, how many of its OWN smallest part could
+// plausibly still fit in what's left on that last sheet.
+function dropPieceHint(g){
+  if(!g.sheetsNeeded || g.leftoverArea < 1) return '';
+  const smallest = g.parts.slice().sort((a, b) => a.area - b.area)[0];
+  if(!smallest || !smallest.area) return '';
+  const n = Math.floor(g.leftoverArea / smallest.area);
+  if(n < 1) return '';
+  return '~' + Math.round(g.leftoverArea).toLocaleString() + ' in² left on the last sheet - could fit roughly ' + n + ' more of "' + (smallest.description || smallest.productNo || 'the smallest part') + '" (' + Math.round(smallest.area) + ' in² each).';
+}
 function code8(){
   const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let s = ''; const r = crypto.getRandomValues(new Uint8Array(8));
@@ -108,7 +156,8 @@ const spoolsForJob = j => S.spools.filter(s => s.kind === 'field' && s.jobNo && 
 const stockFieldSpools = () => S.spools.filter(s => s.kind === 'field' && !s.jobNo);
 
 const job = id => S.jobs.find(j => j.id === id);
-const listsOf = jobId => S.lists.filter(l => l.jobId === jobId).sort((a, b) => (a.title + a.carNo).localeCompare(b.title + b.carNo));
+const listsOf = jobId => S.lists.filter(l => l.jobId === jobId && l.kind !== 'laser').sort((a, b) => (a.title + a.carNo).localeCompare(b.title + b.carNo));
+const laserListsOf = jobId => S.lists.filter(l => l.jobId === jobId && l.kind === 'laser').sort((a, b) => (b.importedAt || '').localeCompare(a.importedAt || ''));
 function lineRef(listId, lineId){
   const l = S.lists.find(x => x.id === listId);
   return l ? { list: l, line: l.items.find(x => x.id === lineId) } : {};
@@ -331,7 +380,7 @@ function renderTabs(){
   const v = S.view;
   let h = '<button class="tab' + (v.name === 'dash' ? ' on' : '') + '" data-act="goDash">Dashboard</button>' +
     '<button class="tab' + (v.name === 'recv' ? ' on' : '') + '" data-act="goRecv">Inventory</button>' +
-    '<button class="tab' + (v.name === 'spools' ? ' on' : '') + '" data-act="goSpools">Spools</button>';
+    (isLaser() ? '' : '<button class="tab' + (v.name === 'spools' ? ' on' : '') + '" data-act="goSpools">Spools</button>');
   S.set.openTabs = S.set.openTabs.filter(id => job(id));
   for(const id of S.set.openTabs){
     const j = job(id), s = jobStats(j), g = listsOf(id)[0];
@@ -342,6 +391,10 @@ function renderTabs(){
   $('#tabs').innerHTML = h;
 }
 function render(){
+  // Laser is a restricted role app-wide - there's no Spools/Settings/Import
+  // for it to land on, so bounce back to the Dashboard rather than render a
+  // view it shouldn't have reached (e.g. a stale tab from switching roles).
+  if(isLaser() && ['spools', 'settings', 'import'].includes(S.view.name)) S.view = { name: 'dash' };
   renderTabs();
   const v = S.view;
   const m = $('#main');
@@ -369,12 +422,15 @@ function viewDash(){
   const pkgRows = allPackaging();
   const pkgNew = pkgRows.reduce((a, { p }) => a + (pkgType(p.type).era === 'new' ? (+p.qty || 0) : 0), 0);
   const pkgOld = pkgRows.reduce((a, { p }) => a + (pkgType(p.type).era === 'old' ? (+p.qty || 0) : 0), 0);
-  let h = '<div class="row"><h1>Jobs</h1><span class="sp"></span>' +
+  let h = '<div class="row"><h1>Jobs</h1><div class="chips" style="margin-left:10px">' +
+    ROLES.map(([k, t]) => '<button class="chip' + (S.set.role === k ? ' on' : '') + '" data-act="setRole" data-k="' + k + '">' + t + '</button>').join('') +
+    '</div><span class="sp"></span>' +
     '<input class="search" placeholder="Search job #, name, customer" value="' + esc(S.ui.dashQ) + '" data-in="dashQ">' +
-    '<button class="btn" data-act="printPackaging">Packaging report</button>' +
-    '<button class="btn" data-act="printAll" data-detail="0">Print summary</button>' +
-    '<button class="btn" data-act="printAll" data-detail="1">Print full report</button>' +
-    '<button class="btn" data-act="goSettings">Settings</button></div>';
+    (isLaser() ? '' :
+      '<button class="btn" data-act="printPackaging">Packaging report</button>' +
+      '<button class="btn" data-act="printAll" data-detail="0">Print summary</button>' +
+      '<button class="btn" data-act="printAll" data-detail="1">Print full report</button>' +
+      '<button class="btn" data-act="goSettings">Settings</button>') + '</div>';
   h += '<div class="stats">' +
     '<div class="stat"><b>' + active.length + '</b><span>Active jobs</span></div>' +
     '<div class="stat"><b>' + (T.total ? pct(T.done / T.total) : '—') + '</b><span>Lines done (' + T.done + '/' + T.total + ')</span></div>' +
@@ -412,34 +468,38 @@ function viewDash(){
 
 /* ================= job view ================= */
 function viewJob(){
-  const j = job(S.view.jobId), s = jobStats(j), ls = listsOf(j.id);
+  const j = job(S.view.jobId), s = jobStats(j), ls = listsOf(j.id), laser = isLaser();
+  const laserLists = laserListsOf(j.id);
   let sub = S.view.sub;
-  if(sub !== 'material' && sub !== 'info' && !ls.some(l => l.id === sub)) sub = S.view.sub = ls[0] ? ls[0].id : 'material';
+  const validSubs = sub === 'material' || sub === 'info' || sub === 'laserlist' || ls.some(l => l.id === sub);
+  if(!validSubs || (laser && (sub === 'material' || sub === 'info'))) sub = S.view.sub = ls[0] ? ls[0].id : 'laserlist';
   const recs = receiptsForJob(j);
   let h = '<div class="card jhead"><div><div class="row"><h1 class="mono">' + esc(j.jobNo) + '</h1>' + (j.status === 'closed' ? '<span class="tag">closed</span>' : '') + '</div>' +
     '<div class="kv"><span>Job name</span><b>' + esc(j.jobName || '—') + '</b><span>Customer</span><b>' + esc(j.customer || '—') + '</b>' +
     (j.shipAddr ? '<span>Ship to</span><b>' + esc(j.shipAddr).replace(/\n/g, ', ') + '</b>' : '') + '</div></div>' +
     '<div class="jpct"><b>' + pct(s.pct) + '</b><div class="muted small">' + s.done + '/' + s.total + ' lines done · ' + s.bo + ' on B/O' + (jobNextShip(j) ? ' · next ship ' + esc(fmtDateLong(jobNextShip(j))) + ' ' + shipBadge(jobNextShip(j)) : '') + '</div>' +
-    '<div class="row" style="justify-content:flex-end;margin-top:8px">' +
+    (laser ? '' : '<div class="row" style="justify-content:flex-end;margin-top:8px">' +
     (jobShipStats(j).total ? '<button class="btn sm" data-act="jobShipments" data-id="' + esc(j.id) + '">Shipments (' + jobShipStats(j).shipped + '/' + jobShipStats(j).total + ' shipped)</button>' : '') +
-    '<button class="btn sm" data-act="printJob">Print job report</button><button class="btn sm" data-act="jobInfo">Job info</button></div></div></div>';
+    '<button class="btn sm" data-act="printJob">Print job report</button><button class="btn sm" data-act="jobInfo">Job info</button></div>') + '</div>';
   h += '<div class="subtabs">' + ls.map(l => {
     const st = Model.listStats(l);
     return '<button class="subtab' + (sub === l.id ? ' on' : '') + '" data-act="sub" data-k="' + l.id + '"><span class="sw" style="background:' + gColor(l.groupKey) + '"></span>' +
       esc(l.title || 'PRODUCT LIST') + (l.carNo ? ' · CAR ' + esc(l.carNo) : '') + ' <span class="muted mono">' + pct(st.pct) + '</span></button>';
   }).join('') +
-    '<button class="subtab' + (sub === 'material' ? ' on' : '') + '" data-act="sub" data-k="material">Material (' + recs.length + (s.unmatched ? ' · ' + s.unmatched + ' unmatched' : '') + ')</button>' +
-    '<button class="subtab" data-act="importList" data-job="' + esc(j.id) + '">+ Add list</button></div>';
-  h += '<div class="panel">' + (sub === 'material' ? viewMaterial(j, recs) : viewList(j, S.lists.find(l => l.id === sub))) + '</div>';
+    (laser ? '' : '<button class="subtab' + (sub === 'material' ? ' on' : '') + '" data-act="sub" data-k="material">Material (' + recs.length + (s.unmatched ? ' · ' + s.unmatched + ' unmatched' : '') + ')</button>' +
+    '<button class="subtab" data-act="importList" data-job="' + esc(j.id) + '">+ Add list</button>') +
+    '<button class="subtab' + (sub === 'laserlist' ? ' on' : '') + '" data-act="sub" data-k="laserlist">Laser cut list' + (laserLists.length ? ' <span class="muted mono">' + laserLists[0].items.length + '</span>' : '') + '</button></div>';
+  h += '<div class="panel">' + (sub === 'material' ? viewMaterial(j, recs) : sub === 'laserlist' ? viewLaserList(j, laserLists[0]) : viewList(j, S.lists.find(l => l.id === sub), laser)) + '</div>';
   return h;
 }
 
-function stampHtml(list, ln, k, qc){
+function stampHtml(list, ln, k, qc, locked){
   const v = qc ? (ln[k] ? { on: true, by: ln[k] } : null) : (ln.st && ln.st[k]);
   const on = v && v.on;
+  if(locked) return '<span class="stamp locked' + (qc ? ' qc' : '') + (on ? ' on' : '') + '">' + (on ? (v.by ? esc(v.by) : '✓') : '—') + '</span>';
   return '<button class="stamp' + (qc ? ' qc' : '') + (on ? ' on' : '') + (on && !v.by ? ' bare' : '') + '" data-act="pick" data-l="' + ln.id + '" data-k="' + k + '" aria-label="' + k + '">' + (on && v.by ? esc(v.by) : '') + '</button>';
 }
-function rowHtml(list, ln, edit){
+function rowHtml(list, ln, edit, laserOnly){
   const st = Model.lineStatus(ln);
   const cls = [st === 'done' ? 'done' : '', st === 'bo' ? 'bo' : '', ln.conf < 0.75 ? 'low' : '', ln.revNote ? 'rev' : ''].join(' ');
   const mats = recvFor(list.id, ln.id).length;
@@ -447,23 +507,31 @@ function rowHtml(list, ln, edit){
     '<td class="gb"><span>' + esc((ln.g || '').replace('GROUP ', 'G')) + '</span></td><td class="n">' + esc(ln.n || '') + '</td>';
   if(edit){
     h += '<td class="edit"><input data-lf="p" data-l="' + ln.id + '" value="' + esc(ln.p) + '"></td><td class="edit"><input data-lf="q" data-l="' + ln.id + '" value="' + esc(ln.q) + '" inputmode="numeric"></td><td class="edit"><input data-lf="d" data-l="' + ln.id + '" value="' + esc(ln.d) + '"></td>';
+  } else if(laserOnly){
+    h += '<td class="part">' + esc(ln.p) + '</td><td class="q">' + esc(ln.q) + '</td><td class="d">' + esc(ln.d) + '</td>';
   } else {
     h += '<td class="part"><button data-act="line" data-l="' + ln.id + '">' + esc(ln.p) + '</button></td><td class="q">' + esc(ln.q) + '</td><td class="d">' + esc(ln.d) + '</td>';
   }
-  for(const k of Model.DK) h += '<td class="st">' + stampHtml(list, ln, k) + '</td>';
-  h += '<td class="inp"><input data-lf="pkQty" data-l="' + ln.id + '" value="' + esc(ln.pkQty) + '" placeholder=" " inputmode="numeric" aria-label="Packaged qty"></td>' +
-    '<td class="st">' + stampHtml(list, ln, 'pkInit', true) + '</td><td class="st">' + stampHtml(list, ln, 'qcInit', true) + '</td>' +
-    '<td class="inp"><input data-lf="skid" data-l="' + ln.id + '" value="' + esc(ln.skid) + '" placeholder=" " aria-label="Skid"></td>' +
-    '<td class="inp boc"><input data-lf="boQty" data-l="' + ln.id + '" value="' + esc(ln.boQty) + '" placeholder=" " inputmode="numeric" aria-label="Back order qty"></td>' +
-    '<td class="mat"><button class="matbtn' + (mats ? ' has' : '') + '" data-act="line" data-l="' + ln.id + '" data-sec="mat">' + (mats ? '▣ ' + mats : '+') + '</button></td>';
+  for(const k of Model.DK) h += '<td class="st">' + stampHtml(list, ln, k, false, laserOnly && k !== 'laser') + '</td>';
+  if(laserOnly){
+    h += '<td class="inp">' + esc(ln.pkQty) + '</td><td class="st">' + stampHtml(list, ln, 'pkInit', true, true) + '</td><td class="st">' + stampHtml(list, ln, 'qcInit', true, true) + '</td>' +
+      '<td class="inp">' + esc(ln.skid) + '</td><td class="inp boc">' + esc(ln.boQty) + '</td>' +
+      '<td class="mat">' + (mats ? '▣ ' + mats : '') + '</td>';
+  } else {
+    h += '<td class="inp"><input data-lf="pkQty" data-l="' + ln.id + '" value="' + esc(ln.pkQty) + '" placeholder=" " inputmode="numeric" aria-label="Packaged qty"></td>' +
+      '<td class="st">' + stampHtml(list, ln, 'pkInit', true) + '</td><td class="st">' + stampHtml(list, ln, 'qcInit', true) + '</td>' +
+      '<td class="inp"><input data-lf="skid" data-l="' + ln.id + '" value="' + esc(ln.skid) + '" placeholder=" " aria-label="Skid"></td>' +
+      '<td class="inp boc"><input data-lf="boQty" data-l="' + ln.id + '" value="' + esc(ln.boQty) + '" placeholder=" " inputmode="numeric" aria-label="Back order qty"></td>' +
+      '<td class="mat"><button class="matbtn' + (mats ? ' has' : '') + '" data-act="line" data-l="' + ln.id + '" data-sec="mat">' + (mats ? '▣ ' + mats : '+') + '</button></td>';
+  }
   if(edit) h += '<td class="del"><button data-act="delLine" data-l="' + ln.id + '" aria-label="Delete line">✕</button></td>';
   return h + '</tr>';
 }
-function viewList(j, list){
-  if(!list) return '<div class="empty"><h2>No product list yet</h2><button class="btn primary" data-act="importList" data-job="' + esc(j.id) + '">+ Import product list</button></div>';
+function viewList(j, list, laserOnly){
+  if(!list) return '<div class="empty"><h2>No product list yet</h2>' + (laserOnly ? '' : '<button class="btn primary" data-act="importList" data-job="' + esc(j.id) + '">+ Import product list</button>') + '</div>';
   const st = Model.listStats(list);
   const f = S.ui.listFilter[list.id] || 'all';
-  const edit = !!S.ui.editLines[list.id];
+  const edit = !laserOnly && !!S.ui.editLines[list.id];
   const items = list.items.filter(ln => {
     const s = Model.lineStatus(ln);
     return f === 'all' || (f === 'open' && s !== 'done') || (f === 'bo' && s === 'bo') || (f === 'done' && s === 'done');
@@ -471,11 +539,12 @@ function viewList(j, list){
   let h = '<div class="titlebar" style="background:' + gColor(list.groupKey) + '">' + esc(list.title || 'PRODUCT LIST') + '</div>' +
     '<div class="ltool"><span class="muted small">CAR ' + esc(list.carNo || '—') + ' · REV ' + esc(list.rev || '—') + (list.formRev ? ' · ' + esc(list.formRev) : '') +
     ' · imported ' + esc(when(list.importedAt)) + (list.hasPdf ? '' : ' · no original PDF') + '</span><span class="sp"></span>' +
+    (laserOnly ? '<span class="tag">View only - sign the Laser column</span>' :
     '<button class="btn sm" data-act="exportPdf">Export filled PDF</button>' +
     '<button class="btn sm" data-act="importList" data-job="' + esc(j.id) + '" data-list="' + list.id + '">Update from PDF</button>' +
     '<button class="btn sm" data-act="listInfo">Signatures</button>' +
-    '<button class="btn sm' + (edit ? ' dark' : '') + '" data-act="editLines">' + (edit ? 'Done editing' : 'Edit lines') + '</button></div>';
-  h += '<div class="ltool"><span class="muted small">' + shipSummaryHtml(list) + '</span><span class="sp"></span><button class="btn sm" data-act="listShip">Shipping</button></div>';
+    '<button class="btn sm' + (edit ? ' dark' : '') + '" data-act="editLines">' + (edit ? 'Done editing' : 'Edit lines') + '</button>') + '</div>';
+  if(!laserOnly) h += '<div class="ltool"><span class="muted small">' + shipSummaryHtml(list) + '</span><span class="sp"></span><button class="btn sm" data-act="listShip">Shipping</button></div>';
   h += '<div class="ltool"><div class="chips" id="lchips">' + [['all', 'All', st.total], ['open', 'Open', st.total - st.done], ['bo', 'Back order', st.bo], ['done', 'Done', st.done]]
     .map(([k, t, n]) => '<button class="chip' + (f === k ? ' on' : '') + '" data-act="lfilter" data-k="' + k + '">' + t + ' <b>' + n + '</b></button>').join('') + '</div>' +
     '<span class="sp"></span><span class="muted small">Tap a part # for history, material and back-order details. Tap a box to sign.</span></div>';
@@ -483,7 +552,7 @@ function viewList(j, list){
     '<th colspan="2" class="pk">Packaging</th><th colspan="2" class="qc">QC check / pkg details</th><th class="bo">Back order</th><th></th>' + (edit ? '<th></th>' : '') + '</tr>' +
     '<tr><th>Grp</th><th>#</th><th>Part #</th><th>Qty</th><th>Description</th>' + Model.DEPTS.map(d => '<th>' + d[1] + '</th>').join('') +
     '<th>Qty</th><th>Init.</th><th>Init.</th><th>Skid #</th><th>B/O</th><th>Mat.</th>' + (edit ? '<th></th>' : '') + '</tr></thead><tbody>' +
-    items.map(ln => rowHtml(list, ln, edit)).join('') + '</tbody></table></div>';
+    items.map(ln => rowHtml(list, ln, edit, laserOnly)).join('') + '</tbody></table></div>';
   if(edit) h += '<div class="row" style="margin-top:10px"><button class="btn" data-act="addLine">+ Add line</button><span class="sp"></span><button class="btn danger" data-act="delList">Delete this list</button></div>';
   if(!items.length) h += '<p class="muted" style="text-align:center;padding:20px">No lines in this filter.</p>';
   return h;
@@ -496,7 +565,7 @@ function refreshRow(list, lineId){
   const a = document.activeElement;
   const refocus = a && tr.contains(a) && a.dataset ? a.dataset.lf : null;
   const tmp = document.createElement('tbody');
-  tmp.innerHTML = rowHtml(list, ln, !!S.ui.editLines[list.id]);
+  tmp.innerHTML = rowHtml(list, ln, !isLaser() && !!S.ui.editLines[list.id], isLaser());
   tr.replaceWith(tmp.firstElementChild);
   if(refocus){ const n = document.querySelector('tr[data-row="' + lineId + '"] [data-lf="' + refocus + '"]'); if(n) n.focus(); }
   // header percentages without a full re-render
@@ -507,6 +576,135 @@ function refreshRow(list, lineId){
   if(lc){ const n = { all: ls.total, open: ls.total - ls.done, bo: ls.bo, done: ls.done }; lc.querySelectorAll('[data-k]').forEach(c => { const x = c.querySelector('b'); if(x) x.textContent = n[c.dataset.k]; }); }
   const j = job(list.jobId), s = jobStats(j), jp = document.querySelector('.jpct');
   if(jp){ jp.querySelector('b').textContent = pct(s.pct); jp.querySelector('div').textContent = s.done + '/' + s.total + ' lines done · ' + s.bo + ' on B/O'; }
+}
+
+/* ================= laser cut lists ================= */
+// A laser cut list is its own kind of list (list.kind === 'laser'), kept out
+// of listsOf()/jobStats() entirely since it has no department sign-off model
+// and shouldn't skew the job's "lines done" rollup. One per job for now -
+// re-uploading the PDF updates it in place (sign-offs on existing product #s
+// carry forward) rather than creating a second one.
+function viewLaserList(j, list){
+  if(!list){
+    return '<div class="empty"><h2>No laser cut list yet</h2><p class="muted">Upload the laser cut list PDF for this job to work out sheet material needed.</p>' +
+      '<button class="btn primary" data-act="uploadLaser" data-job="' + esc(j.id) + '">+ Upload cut list</button></div>';
+  }
+  const groups = computeSheetGroups(list.items);
+  const h0 = list.header || {};
+  let h = '<div class="titlebar" style="background:' + gColor('LASER') + ';color:' + gInk('LASER') + '">' + esc(list.title || 'LASER CUT LIST') + '</div>' +
+    '<div class="ltool"><span class="muted small">' + (h0.by ? 'By ' + esc(h0.by) + ' · ' : '') + (h0.elevatorNo ? 'Elevator ' + esc(h0.elevatorNo) + ' · ' : '') +
+    'REV ' + esc(h0.rev || '—') + ' · imported ' + esc(when(list.importedAt)) + ' · ' + list.items.length + ' lines</span><span class="sp"></span>' +
+    '<button class="btn sm" data-act="uploadLaser" data-job="' + esc(j.id) + '" data-list="' + list.id + '">Update from PDF</button>' +
+    '<button class="btn sm" data-act="pullSheets" data-list="' + list.id + '">Re-check stock</button></div>';
+  h += '<div class="card" style="margin:10px 0"><h3 style="margin-top:0">Sheet requirements <span class="muted small">(standard ' + SHEET_W + 'x' + SHEET_L + ' sheets - total area ÷ sheet area, rounded up; not real nesting)</span></h3>' +
+    '<table class="list"><thead><tr><th>Material</th><th>Thick (in)</th><th>Total area (in²)</th><th>Sheets needed</th><th>Pulled from stock</th><th>Status</th><th>Drop-piece suggestion</th></tr></thead><tbody>' +
+    (groups.length ? groups.map(g => {
+      const pulled = ((list.sheetPulls || {})[g.key] || {}).totalPulled || 0;
+      const short = Math.max(0, g.sheetsNeeded - pulled);
+      return '<tr><td>' + esc(g.material || '—') + '</td><td>' + g.thick.toFixed(3) + '</td><td>' + Math.round(g.totalArea).toLocaleString() + '</td><td><b>' + g.sheetsNeeded + '</b></td><td>' + pulled + '</td>' +
+        '<td>' + (short ? '<span class="tag warn">' + short + ' short - buy more</span>' : '<span class="tag ok">covered</span>') + '</td>' +
+        '<td class="small muted">' + esc(dropPieceHint(g) || '—') + '</td></tr>';
+    }).join('') : '<tr><td colspan="7" class="muted" style="text-align:center;padding:20px">No parts with a material/thickness yet.</td></tr>') + '</tbody></table></div>';
+  h += '<div class="twrap"><table class="sheet"><thead><tr><th>Grp</th><th>Product #</th><th>Description</th><th>Qty</th><th>Width</th><th>Length</th><th>Thick</th><th>Gauge</th><th>Material</th><th>Finish</th><th>Area ea (in²)</th><th>Sheets (this line)</th><th>Laser</th></tr></thead><tbody>' +
+    list.items.map(it => {
+      const qty = parseFloat(it.qty) || 0, area = it.area || 0;
+      const lineSheets = area && qty ? (area * qty / SHEET_AREA) : 0;
+      const on = !!it.laserOn;
+      return '<tr data-row="' + it.id + '"><td>' + esc((it.group || '').replace('Group ', 'G')) + '</td><td class="mono small">' + esc(it.productNo || '') + '</td><td>' + esc(it.description || '') + '</td><td>' + esc(it.qty || '') + '</td>' +
+        '<td>' + esc(it.width || '') + '</td><td>' + esc(it.length || '') + '</td><td>' + esc(it.thick || '') + '</td><td>' + esc(it.gauge || '') + '</td><td>' + esc(it.material || '') + '</td><td>' + esc(it.finish || '') + '</td>' +
+        '<td>' + Math.round(area) + '</td><td>' + lineSheets.toFixed(2) + '</td>' +
+        '<td class="st"><button class="stamp' + (on ? ' on' : '') + '" data-act="laserPick" data-l="' + it.id + '">' + (on ? esc(it.laserBy || '✓') : '') + '</button></td></tr>';
+    }).join('') + '</tbody></table></div>';
+  return h;
+}
+function pickLaserSign(list, ln){
+  const cur = ln.laserOn ? (ln.laserBy || '✓') : '';
+  let h = '<h2>Laser</h2><div class="muted"><span class="mono">' + esc(ln.productNo || '') + '</span> · ' + esc(ln.description || '') + '</div>' +
+    '<div class="pick">' + S.set.staff.map(s => '<button data-v="' + esc(s) + '" class="' + (cur === s ? 'cur' : '') + '">' + esc(s) + '</button>').join('') +
+    '<button data-v="" class="alt' + (cur === '✓' ? ' cur' : '') + '">✓ Done, no initials</button></div>' +
+    '<div class="row"><button class="btn danger" data-v="__clear">Clear</button><span class="sp"></span><button class="btn" data-v="__x">Cancel</button></div>';
+  openSheet(h);
+  $('#sheet').onclick = async e => {
+    const b = e.target.closest('[data-v]'); if(!b) return;
+    const v = b.dataset.v;
+    if(v === '__x') return closeSheet();
+    if(v === '__clear'){ ln.laserOn = false; ln.laserBy = ''; ln.laserTs = null; }
+    else { ln.laserOn = true; ln.laserBy = v; ln.laserTs = nowIso(); }
+    closeSheet();
+    await saveList(list);
+    render();
+  };
+}
+// Draws down sheet stock (Inventory > stock receipts with uom SHEET) to
+// cover what this cut list's sheet groups need, oldest sheets first - same
+// withdrawal-log mechanism as taking any other stock out. Only ever pulls
+// the DELTA beyond what's already been pulled for this list (so re-checking
+// after an edit, or re-importing the same PDF, never double-withdraws), and
+// never withdraws more than what's on hand - the gap is reported as a
+// shortfall so buying and job priority can be decided from it.
+async function pullSheetsFromStock(list){
+  const groups = computeSheetGroups(list.items);
+  list.sheetPulls = list.sheetPulls || {};
+  let anyPulled = false, anyShort = false;
+  for(const g of groups){
+    const rec = list.sheetPulls[g.key] || { totalPulled: 0 };
+    const need = g.sheetsNeeded - rec.totalPulled;
+    if(need <= 0) continue;
+    const stock = S.receipts.filter(r => r.type === 'stock' && r.uom === 'SHEET' && sheetKeyOf(r.sheetMaterial, r.sheetThick) === g.key && onHandQty(r) > 0)
+      .sort((a, b) => (a.receivedAt || '').localeCompare(b.receivedAt || ''));
+    let remaining = need; const touched = [];
+    for(const r of stock){
+      if(remaining <= 0) break;
+      const avail = onHandQty(r); if(!avail) continue;
+      const take = Math.min(avail, remaining);
+      r.withdrawals = r.withdrawals || [];
+      r.withdrawals.push({ id: uid(), qty: take, by: 'Laser cut list', note: 'Pulled for ' + (job(list.jobId) || {}).jobNo, at: nowIso() });
+      touched.push(r);
+      remaining -= take;
+    }
+    for(const r of touched) await saveReceipt(r);
+    const pulled = need - remaining;
+    if(pulled > 0){ rec.totalPulled += pulled; anyPulled = true; }
+    if(remaining > 0) anyShort = true;
+    list.sheetPulls[g.key] = rec;
+  }
+  await saveList(list);
+  if(anyShort) toast('Pulled sheets from stock - some sheet types are short. Buy more to cover the shortfall.', true);
+  else if(anyPulled) toast('Pulled the needed sheets from stock.');
+  else toast('Stock already covers this cut list.');
+}
+// One laser cut list per job (re-uploading updates it in place). Matches
+// rows to the existing list by Product # so laser sign-offs already done
+// aren't lost on a re-import/revision.
+async function importLaserList(file, target){
+  const j = job(target.jobId);
+  if(!j) return toast('Open the job first, then upload its cut list', true);
+  toast('Reading laser cut list…');
+  let r;
+  try{ r = await Parse.readLaser(file); }catch(err){ return toast('Could not read that PDF: ' + (err && err.message || err), true); }
+  if(!r.rows.length) return toast('No laser cut list rows found in that PDF', true);
+  let list = target.listId ? S.lists.find(x => x.id === target.listId) : laserListsOf(j.id)[0];
+  const prevItems = list ? list.items : [];
+  const items = r.rows.map(row => {
+    const prev = row.productNo && prevItems.find(p => p.productNo === row.productNo);
+    return {
+      id: prev ? prev.id : uid(), group: row.group || '', subGroup: row.subGroup || '', production: row.production || '',
+      productNo: row.productNo || '', description: row.description || '', qty: row.qty || '', width: row.width || '', length: row.length || '',
+      thick: row.thick || '', gauge: row.gauge || '', stockNo: row.stockNo || '', weight: row.weight || '', material: row.material || '', finish: row.finish || '', notes: row.notes || '',
+      laserOn: prev ? !!prev.laserOn : false, laserBy: prev ? prev.laserBy || '' : '', laserTs: prev ? prev.laserTs || null : null
+    };
+  });
+  if(!list){
+    list = { id: uid(), jobId: j.id, kind: 'laser', title: 'LASER CUT LIST', carNo: '', groupKey: 'LASER', rev: r.header.rev || '',
+      header: r.header, items, sheetPulls: {}, importedAt: nowIso(), mode: 'laser' };
+    S.lists.push(list);
+  } else {
+    list.header = r.header; list.rev = r.header.rev || list.rev; list.items = items; list.importedAt = nowIso();
+  }
+  computeSheetGroups(list.items);
+  await saveList(list);
+  await pullSheetsFromStock(list);
+  go({ name: 'job', jobId: j.id, sub: 'laserlist' });
 }
 
 /* ---- sign-off logic ---- */
@@ -529,6 +727,10 @@ function setPkQty(ln, v){
   else { ln.boQty = ''; }
 }
 function pickSheet(list, ln, k){
+  // Belt-and-suspenders: the row itself only renders a clickable stamp for
+  // the Laser column under the Laser role, but guard here too in case a
+  // stale drawer/row from before a role switch still points at another dept.
+  if(isLaser() && k !== 'laser') return toast("The Laser role can only sign off the Laser column", true);
   const qc = k === 'pkInit' || k === 'qcInit' || k === 'boInit';
   const cur = qc ? ln[k] : (ln.st && ln.st[k] && ln.st[k].on ? (ln.st[k].by || '✓') : '');
   const name = { pkInit: 'Packaging', qcInit: 'QC check', boInit: 'Back order' }[k] || Model.DEPTS.find(d => d[0] === k)[1];
@@ -835,8 +1037,9 @@ function viewRecv(){
   h += '<div class="card"><h2>Receive material</h2><div class="form" style="margin-top:10px" id="recvForm">' +
     '<div class="seg"><button data-act="recvType" data-k="job" class="' + (t === 'job' ? 'on' : '') + '">For a job</button><button data-act="recvType" data-k="stock" class="' + (t === 'stock' ? 'on' : '') + '">Stock</button></div>' +
     (t === 'job' ? '<label>Job #<input id="recvJob" list="dlJobs" autocomplete="off" value="' + esc(d.jobNo || '') + '" placeholder="MEII-3181"></label><datalist id="dlJobs">' + S.jobs.map(j => '<option value="' + esc(j.jobNo) + '">' + esc(j.jobName) + '</option>').join('') + '</datalist>' : '') +
-    '<label>Description<input id="recvDesc" autocomplete="off" placeholder="What came in"></label>' +
-    '<div class="two"><label>Part # (if marked)<input id="recvPart" autocomplete="off"></label><label>Qty<div class="row" style="gap:6px;flex-wrap:nowrap"><input id="recvQty" inputmode="decimal" style="min-width:0;flex:1" value="1"><select id="recvUom" style="width:78px"><option>EA</option><option>BOX</option><option>SKID</option><option>FT</option><option>LB</option><option>SET</option></select></div></label></div>' +
+    (S.ui.recvUomSheet ? '' : '<label>Description<input id="recvDesc" autocomplete="off" placeholder="What came in"></label>') +
+    '<div class="two"><label>Part # (if marked)<input id="recvPart" autocomplete="off"></label><label>Qty<div class="row" style="gap:6px;flex-wrap:nowrap"><input id="recvQty" inputmode="decimal" style="min-width:0;flex:1" value="1"><select id="recvUom" style="width:78px"><option>EA</option><option>BOX</option><option>SKID</option><option>FT</option><option>LB</option><option>SET</option><option>SHEET</option></select></div></label></div>' +
+    (S.ui.recvUomSheet ? '<div class="two"><label>Sheet material<input id="recvSheetMat" autocomplete="off" placeholder="e.g. CRS"></label><label>Thickness (in)<input id="recvSheetThick" inputmode="decimal" placeholder="e.g. 0.075"></label></div><p class="muted small">Sheets are standard ' + SHEET_W + 'x' + SHEET_L + ' - description is filled in from material + thickness.</p>' : '') +
     '<div class="two"><label>Supplier<input id="recvSup" autocomplete="off" value="' + esc(d.supplier || '') + '"></label><label>PO #<input id="recvPo" autocomplete="off" value="' + esc(d.po || '') + '"></label></div>' +
     '<div class="two"><label>Packing slip #<input id="recvSlip" autocomplete="off" value="' + esc(d.slip || '') + '"></label><label>Location / bin<input id="recvBin" list="dlBins" autocomplete="off" value="' + esc(d.bin || '') + '"></label></div><datalist id="dlBins">' + binOptions() + '</datalist>' +
     '<label>Received by<select id="recvBy">' + S.set.staff.map(s => '<option' + (d.by === s ? ' selected' : '') + '>' + esc(s) + '</option>').join('') + '</select></label>' +
@@ -881,12 +1084,20 @@ async function saveRecv(print){
     slip: g('recvSlip').trim(), bin: g('recvBin').trim().toUpperCase(), receivedBy: g('recvBy'), note: g('recvNote').trim(),
     photo: S.ui.draftPhoto || null, receivedAt: nowIso(), labelPrinted: false, matches: [], source: 'app'
   };
+  if(r.uom === 'SHEET'){
+    r.sheetMaterial = g('recvSheetMat').trim().toUpperCase();
+    r.sheetThick = parseFloat(g('recvSheetThick')) || 0;
+    if(!r.sheetMaterial) return toast('Enter the sheet material', true);
+    if(!r.sheetThick) return toast('Enter the sheet thickness', true);
+    r.description = sheetDesc(r.sheetMaterial, r.sheetThick);
+  }
   if(type === 'job' && !r.jobNo) return toast('Enter the job # (or switch to Stock)', true);
   if(!r.description) return toast('Enter a description', true);
   if(!r.qty) return toast('Enter a quantity', true);
   S.receipts.push(r); await saveReceipt(r);
   S.ui.lastRecv = { jobNo: r.jobNo, supplier: r.supplier, po: r.po, slip: r.slip, bin: r.bin, by: r.receivedBy };
   S.ui.draftPhoto = null;
+  S.ui.recvUomSheet = false;
   S.view.focusDesc = true;
   render();
   toast('Received ' + r.code + (r.jobNo && !S.jobs.some(j => Model.sameJob(r.jobNo, j.jobNo)) ? ' — job ' + r.jobNo + ' not imported yet; it will attach when it is' : ''));
@@ -1833,6 +2044,7 @@ function printSpoolLabel(sp){
 
 /* ================= events ================= */
 const A = {
+  setRole: b => { S.set.role = b.dataset.k; saveSet('role'); go({ name: 'dash' }); },
   goDash: () => go({ name: 'dash' }),
   goRecv: () => go({ name: 'recv' }),
   goSpools: () => go({ name: 'spools' }),
@@ -1851,6 +2063,9 @@ const A = {
   sub: b => { S.view.sub = b.dataset.k; closeDrawer(); render(); },
   lfilter: b => { S.ui.listFilter[S.view.sub] = b.dataset.k; render(); },
   importList: b => { IMP_TARGET = { jobId: b.dataset.job, listId: b.dataset.list }; $('#fileList').value = ''; $('#fileList').click(); },
+  uploadLaser: b => { LASER_TARGET = { jobId: b.dataset.job, listId: b.dataset.list }; $('#fileLaser').value = ''; $('#fileLaser').click(); },
+  pullSheets: async b => { const l = S.lists.find(x => x.id === b.dataset.list); if(l) await pullSheetsFromStock(l); render(); },
+  laserPick: b => { const l = laserListsOf(S.view.jobId)[0]; if(l) pickLaserSign(l, l.items.find(x => x.id === b.dataset.l)); },
   pick: b => { const l = curList(); pickSheet(l, l.items.find(x => x.id === b.dataset.l), b.dataset.k); },
   pickDrawer: b => { const l = S.lists.find(x => x.id === $('#drawer').dataset.list); pickSheet(l, l.items.find(x => x.id === $('#drawer').dataset.line), b.dataset.k); },
   line: b => openLine(curList(), b.dataset.l, b.dataset.sec),
@@ -1956,6 +2171,7 @@ const A = {
   }
 };
 let IMP_TARGET = null;
+let LASER_TARGET = null;
 let BOL_TARGET = null;
 // keep typed-but-unsaved receiving form values across a re-render
 function keepForm(fn){
@@ -1978,7 +2194,10 @@ document.addEventListener('input', e => {
 });
 document.addEventListener('change', async e => {
   const t = e.target;
-  if(t.dataset.lf){
+  if(t.id === 'recvUom'){
+    S.ui.recvUomSheet = t.value === 'SHEET';
+    keepForm(render);
+  } else if(t.dataset.lf){
     const l = curList(); const ln = l && l.items.find(x => x.id === t.dataset.l); if(!ln) return;
     const k = t.dataset.lf, v = t.value.trim();
     if(k === 'pkQty') setPkQty(ln, v);
@@ -1998,6 +2217,11 @@ $('#fileList').addEventListener('change', e => {
   const files = [...e.target.files]; if(!files.length) return;
   const t = IMP_TARGET || {}; IMP_TARGET = null;
   startImport(files, t);
+});
+$('#fileLaser').addEventListener('change', e => {
+  const f = e.target.files[0]; if(!f) return;
+  const t = LASER_TARGET || {}; LASER_TARGET = null;
+  importLaserList(f, t);
 });
 $('#fileMove').addEventListener('change', e => { const f = e.target.files[0]; if(f) importMove(f); });
 $('#fileBackup').addEventListener('change', e => { const f = e.target.files[0]; if(f) backupImport(f); });

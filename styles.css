@@ -7,6 +7,7 @@
   --g-G1:#c5e3c8; --g-G1-ink:#2e6b43; --g-G2:#f0c9c9; --g-G2-ink:#9e2f2f;
   --g-G3:#bcdbe7; --g-G3-ink:#2f6f8f; --g-ENT:#d8c9e8; --g-ENT-ink:#5f4488;
   --g-CAB:#f4a86b; --g-CAB-ink:#9a4a12; --g-X:#dfe2de; --g-X-ink:#454b52;
+  --g-LASER:#e8d9ef; --g-LASER-ink:#5f4488;
 }
 *{box-sizing:border-box}
 html,body{margin:0}
@@ -127,6 +128,8 @@ td.mat{width:48px;text-align:center}
 .stamp.on{background:var(--gofill);border-color:var(--go);color:var(--go)}
 .stamp.on.bare::after{content:"\2713";font-size:20px}
 .stamp.qc.on{background:#dde9f2;border-color:var(--blue);color:var(--blue)}
+.stamp.locked{cursor:default;border-style:dashed;color:var(--mute)}
+.stamp.locked.on{border-style:solid}
 .matbtn{border:0;background:transparent;cursor:pointer;font:700 12px ui-monospace,monospace;padding:10px 4px;width:100%;color:var(--mute)}
 .matbtn.has{color:var(--blue)}
 tr.done td{background:var(--gofill)}
