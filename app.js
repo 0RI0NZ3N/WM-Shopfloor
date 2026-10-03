@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v16';
+const APP_VERSION = 'v17';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -469,10 +469,15 @@ function viewDash(){
 /* ================= job view ================= */
 function viewJob(){
   const j = job(S.view.jobId), s = jobStats(j), ls = listsOf(j.id), laser = isLaser();
+  // Cut lists work exactly like product lists - one per upload, its own
+  // subtab, its own "Update from PDF" - not one combined list per job. A
+  // job can have a laser list per group (G1/G2/G3...) just like it can
+  // have a product list per group.
   const laserLists = laserListsOf(j.id);
   let sub = S.view.sub;
-  const validSubs = sub === 'material' || sub === 'info' || sub === 'laserlist' || ls.some(l => l.id === sub);
-  if(!validSubs || (laser && (sub === 'material' || sub === 'info'))) sub = S.view.sub = ls[0] ? ls[0].id : 'laserlist';
+  const allIds = new Set([...ls.map(l => l.id), ...laserLists.map(l => l.id)]);
+  const validSubs = sub === 'material' || sub === 'info' || allIds.has(sub);
+  if(!validSubs || (laser && (sub === 'material' || sub === 'info'))) sub = S.view.sub = ls[0] ? ls[0].id : (laserLists[0] ? laserLists[0].id : null);
   const recs = receiptsForJob(j);
   let h = '<div class="card jhead"><div><div class="row"><h1 class="mono">' + esc(j.jobNo) + '</h1>' + (j.status === 'closed' ? '<span class="tag">closed</span>' : '') + '</div>' +
     '<div class="kv"><span>Job name</span><b>' + esc(j.jobName || '—') + '</b><span>Customer</span><b>' + esc(j.customer || '—') + '</b>' +
@@ -488,8 +493,11 @@ function viewJob(){
   }).join('') +
     (laser ? '' : '<button class="subtab' + (sub === 'material' ? ' on' : '') + '" data-act="sub" data-k="material">Material (' + recs.length + (s.unmatched ? ' · ' + s.unmatched + ' unmatched' : '') + ')</button>' +
     '<button class="subtab" data-act="importList" data-job="' + esc(j.id) + '">+ Add list</button>') +
-    '<button class="subtab' + (sub === 'laserlist' ? ' on' : '') + '" data-act="sub" data-k="laserlist">Laser cut list' + (laserLists.length ? ' <span class="muted mono">' + laserLists[0].items.length + '</span>' : '') + '</button></div>';
-  h += '<div class="panel">' + (sub === 'material' ? viewMaterial(j, recs) : sub === 'laserlist' ? viewLaserList(j, laserLists[0]) : viewList(j, S.lists.find(l => l.id === sub), laser)) + '</div>';
+    laserLists.map(l => '<button class="subtab' + (sub === l.id ? ' on' : '') + '" data-act="sub" data-k="' + l.id + '"><span class="sw" style="background:' + gColor('LASER') + '"></span>' +
+      esc(l.title || 'LASER CUT LIST') + ' <span class="muted mono">' + l.items.length + ' pcs</span></button>').join('') +
+    '<button class="subtab" data-act="uploadLaser" data-job="' + esc(j.id) + '">+ Add cut list</button></div>';
+  const curLaser = laserLists.find(l => l.id === sub);
+  h += '<div class="panel">' + (sub === 'material' ? viewMaterial(j, recs) : curLaser ? viewLaserList(j, curLaser) : viewList(j, S.lists.find(l => l.id === sub), laser)) + '</div>';
   return h;
 }
 
@@ -683,7 +691,10 @@ async function importLaserList(file, target){
   let r;
   try{ r = await Parse.readLaser(file); }catch(err){ return toast('Could not read that PDF: ' + (err && err.message || err), true); }
   if(!r.rows.length) return toast('No laser cut list rows found in that PDF', true);
-  let list = target.listId ? S.lists.find(x => x.id === target.listId) : laserListsOf(j.id)[0];
+  // No target.listId = "+ Add cut list": always a new one, same as "+ Add
+  // list" does for product lists, so a job can carry a separate cut list
+  // per group instead of one list forced to cover the whole job.
+  let list = target.listId ? S.lists.find(x => x.id === target.listId) : null;
   const prevItems = list ? list.items : [];
   const items = r.rows.map(row => {
     const prev = row.productNo && prevItems.find(p => p.productNo === row.productNo);
@@ -695,16 +706,16 @@ async function importLaserList(file, target){
     };
   });
   if(!list){
-    list = { id: uid(), jobId: j.id, kind: 'laser', title: 'LASER CUT LIST', carNo: '', groupKey: 'LASER', rev: r.header.rev || '',
+    list = { id: uid(), jobId: j.id, kind: 'laser', title: r.header.title || 'LASER CUT LIST', carNo: '', groupKey: 'LASER', rev: r.header.rev || '',
       header: r.header, items, sheetPulls: {}, importedAt: nowIso(), mode: 'laser' };
     S.lists.push(list);
   } else {
-    list.header = r.header; list.rev = r.header.rev || list.rev; list.items = items; list.importedAt = nowIso();
+    list.header = r.header; list.title = r.header.title || list.title; list.rev = r.header.rev || list.rev; list.items = items; list.importedAt = nowIso();
   }
   computeSheetGroups(list.items);
   await saveList(list);
   await pullSheetsFromStock(list);
-  go({ name: 'job', jobId: j.id, sub: 'laserlist' });
+  go({ name: 'job', jobId: j.id, sub: list.id });
 }
 
 /* ---- sign-off logic ---- */
@@ -2065,7 +2076,7 @@ const A = {
   importList: b => { IMP_TARGET = { jobId: b.dataset.job, listId: b.dataset.list }; $('#fileList').value = ''; $('#fileList').click(); },
   uploadLaser: b => { LASER_TARGET = { jobId: b.dataset.job, listId: b.dataset.list }; $('#fileLaser').value = ''; $('#fileLaser').click(); },
   pullSheets: async b => { const l = S.lists.find(x => x.id === b.dataset.list); if(l) await pullSheetsFromStock(l); render(); },
-  laserPick: b => { const l = laserListsOf(S.view.jobId)[0]; if(l) pickLaserSign(l, l.items.find(x => x.id === b.dataset.l)); },
+  laserPick: b => { const l = S.lists.find(x => x.id === S.view.sub && x.kind === 'laser'); if(l) pickLaserSign(l, l.items.find(x => x.id === b.dataset.l)); },
   pick: b => { const l = curList(); pickSheet(l, l.items.find(x => x.id === b.dataset.l), b.dataset.k); },
   pickDrawer: b => { const l = S.lists.find(x => x.id === $('#drawer').dataset.list); pickSheet(l, l.items.find(x => x.id === $('#drawer').dataset.line), b.dataset.k); },
   line: b => openLine(curList(), b.dataset.l, b.dataset.sec),
