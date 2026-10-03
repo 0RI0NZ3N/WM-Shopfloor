@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v14';
+const APP_VERSION = 'v15';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -53,7 +53,7 @@ window.Model = Model;
 const S = {
   jobs: [], lists: [], receipts: [], spools: [],
   set: { staff: ['M.I', 'Y.S', 'N.P', 'Z.M'], pin: '', openTabs: [], label: { w: 2, h: 1, dpi: 203 }, bins: [],
-    shipFrom: ['1149 Pioneer Rd, Burlington, ON', '3230 Mainway, Burlington, ON'] },
+    shipFrom: ['1149 Pioneer Rd, Burlington, ON', '3230 Mainway, Burlington, ON'], contacts: [] },
   view: { name: 'dash' },
   ui: { dashFilter: 'active', dashSort: 'ship', dashQ: '', listFilter: {}, recvFilter: 'all', recvQ: '', recvView: 'stock', editLines: {}, recvType: 'job', draftPhoto: null, lastRecv: {}, spoolQ: '', spoolFilter: 'all' }
 };
@@ -158,6 +158,18 @@ function normalizeDateStr(s){
 function newShipment(overrides){
   return Object.assign({ id: uid(), label: '', shipDate: '', weightKg: '', skidCount: '', shipFrom: '', contactName: '', contactPhone: '',
     bookedCarrier: '', bookedRate: '', bookedBol: '', bolFile: null, lastRfqEmail: '', rfqLog: [], shippedAt: null }, overrides || {});
+}
+// Remembers a site contact's phone number the first time it's typed on any
+// shipment, so the next product list's shipment form can suggest it instead
+// of someone having to look the number up again.
+function rememberContact(name, phone){
+  name = (name || '').trim(); phone = (phone || '').trim();
+  if(!name) return;
+  S.set.contacts = S.set.contacts || [];
+  const c = S.set.contacts.find(x => x.name.toLowerCase() === name.toLowerCase());
+  if(c){ if(phone) c.phone = phone; }
+  else S.set.contacts.push({ name, phone });
+  saveSet('contacts');
 }
 // All shipments across every list on a job, in one flat list - used for the
 // per-job shipment count badge and the combined shipments sheet, since
@@ -1444,13 +1456,19 @@ function printBoRollup(rows){
 // Pure: builds the mailto: URL for one shipment. Kept separate from
 // sendRfq's side effects (logging, saving, navigating) so it's easy to test
 // and to tweak the wording without touching anything stateful.
+// A plain "Hi," read cold to a carrier dispatcher - a time-of-day greeting
+// reads like it came from a person, not a form letter.
+function timeGreeting(){
+  const h = new Date().getHours();
+  return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+}
 function rfqMailto(l, j, sp, email){
   const autoSkid = new Set(l.items.map(x => (x.skid || '').trim()).filter(Boolean)).size;
   const skids = sp.skidCount || autoSkid;
   const subject = 'Freight RFQ - ' + j.jobNo + (l.carNo ? ' CAR ' + l.carNo : (l.title ? ' ' + l.title : '')) + (sp.label ? ' - ' + sp.label : '') + (sp.shipDate ? ' - ship ' + sp.shipDate : '');
   const body = [
-    'Hi,', '',
-    'Please quote freight for the following shipment:', '',
+    timeGreeting() + ',', '',
+    'Could you please quote freight for the following shipment:', '',
     'Pickup: ' + (sp.shipFrom || '—'),
     'Delivery: ' + (j.shipAddr || '—').replace(/\n/g, ', '),
     'Ready to ship: ' + (fmtDateLong(sp.shipDate) || 'TBD'),
@@ -1512,8 +1530,9 @@ function editShipment(l, j, sp){
     '<div class="two"><label>Skid count' + (autoSkid ? ' <span class="muted small">(suggest ' + autoSkid + ' from skid #s logged)</span>' : '') +
     '<input data-sf="skidCount" inputmode="numeric" value="' + esc(sp.skidCount || '') + '" placeholder="' + (autoSkid || '') + '"></label>' +
     '<label>Ship from<select data-sf="shipFrom"><option value="">—</option>' + S.set.shipFrom.map(a => '<option' + (sp.shipFrom === a ? ' selected' : '') + '>' + esc(a) + '</option>').join('') + '</select></label></div>' +
-    '<div class="two"><label>Site contact name<input data-sf="contactName" value="' + esc(sp.contactName || '') + '" placeholder="' + esc(j.attn || '') + '"></label>' +
-    '<label>Site contact phone<input data-sf="contactPhone" value="' + esc(sp.contactPhone || '') + '"></label></div></div>' +
+    '<div class="two"><label>Site contact name<input data-sf="contactName" list="dlContacts" autocomplete="off" value="' + esc(sp.contactName || '') + '" placeholder="' + esc(j.attn || '') + '"></label>' +
+    '<label>Site contact phone<input data-sf="contactPhone" value="' + esc(sp.contactPhone || '') + '"></label></div>' +
+    '<datalist id="dlContacts">' + (S.set.contacts || []).map(c => '<option value="' + esc(c.name) + '">').join('') + '</datalist></div>' +
     '<h3 class="small muted" style="margin-top:14px">BOOKED</h3><div class="form">' +
     '<div class="two"><label>Carrier<input data-sf="bookedCarrier" value="' + esc(sp.bookedCarrier || '') + '"></label>' +
     '<label>Rate ($ CAD)<input data-sf="bookedRate" inputmode="decimal" value="' + esc(sp.bookedRate || '') + '"></label></div>' +
@@ -1531,9 +1550,18 @@ function editShipment(l, j, sp){
       sp.rfqLog.slice().sort((a, b) => (b.at || '').localeCompare(a.at || '')).map(x => '<div class="opt" style="cursor:default"><span>' + esc(x.email) + '<br><span class="small muted">' + esc(when(x.at)) + '</span></span></div>').join('') + '</div>' : '') +
     '<div class="row" style="margin-top:14px"><label class="chip" style="cursor:pointer"><input type="checkbox" id="spShipped"' + (sp.shippedAt ? ' checked' : '') + '> Mark this shipment as shipped</label></div>' +
     '<div class="row" style="margin-top:12px"><button class="btn danger" data-g="del">Delete shipment</button><span class="sp"></span><button class="btn" data-g="back">Back</button><button class="btn dark" data-g="s">Save</button></div>');
+  const cnEl = document.querySelector('#sheet [data-sf="contactName"]');
+  if(cnEl) cnEl.addEventListener('input', () => {
+    const match = (S.set.contacts || []).find(c => c.name.toLowerCase() === cnEl.value.trim().toLowerCase());
+    const phEl = document.querySelector('#sheet [data-sf="contactPhone"]');
+    if(match && match.phone && phEl && !phEl.value) phEl.value = match.phone;
+  });
   $('#sheet').onclick = async e => {
     const b = e.target.closest('[data-g]'); if(!b) return;
-    const collect = () => document.querySelectorAll('#sheet [data-sf]').forEach(i => sp[i.dataset.sf] = i.value.trim());
+    const collect = () => {
+      document.querySelectorAll('#sheet [data-sf]').forEach(i => sp[i.dataset.sf] = i.value.trim());
+      rememberContact(sp.contactName, sp.contactPhone);
+    };
     if(b.dataset.g === 's'){
       collect();
       sp.shippedAt = $('#spShipped').checked ? (sp.shippedAt || nowIso()) : null;
