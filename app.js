@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v20';
+const APP_VERSION = 'v21';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -53,7 +53,7 @@ window.Model = Model;
 const S = {
   jobs: [], lists: [], receipts: [], spools: [],
   set: { staff: ['M.I', 'Y.S', 'N.P', 'Z.M'], pin: '', openTabs: [], label: { w: 2, h: 1, dpi: 203 }, bins: [],
-    shipFrom: ['1149 Pioneer Rd, Burlington, ON', '3230 Mainway, Burlington, ON'], contacts: [], role: 'wl' },
+    shipFrom: ['1149 Pioneer Rd, Burlington, ON', '3230 Mainway, Burlington, ON'], contacts: [], role: 'wl', packingSlipSeq: 0 },
   view: { name: 'dash' },
   ui: { dashFilter: 'active', dashSort: 'ship', dashQ: '', listFilter: {}, recvFilter: 'all', recvQ: '', recvView: 'stock', editLines: {}, recvType: 'job', draftPhoto: null, lastRecv: {}, spoolQ: '', spoolFilter: 'all', recvUomSheet: false }
 };
@@ -186,6 +186,14 @@ async function load(){
   try{ if(navigator.storage && navigator.storage.persist) S.persisted = await navigator.storage.persist(); }catch(e){}
 }
 const saveSet = k => DB.setSetting(k, S.set[k]);
+// Packing slip numbers are assigned once per shipment (the first time its
+// packing slip is printed) and never reassigned on reprint - a fresh
+// counter starting at 1, shared across the one tablet this app runs on.
+function nextPackingSlipNo(){
+  S.set.packingSlipSeq = (S.set.packingSlipSeq || 0) + 1;
+  saveSet('packingSlipSeq');
+  return S.set.packingSlipSeq;
+}
 async function saveList(list){ list.updatedAt = nowIso(); await DB.put('lists', list); const j = job(list.jobId); if(j){ j.updatedAt = list.updatedAt; await DB.put('jobs', j); } }
 async function saveJob(j){ j.updatedAt = nowIso(); await DB.put('jobs', j); }
 async function saveReceipt(r){ r.updatedAt = nowIso(); await DB.put('receipts', r); }
@@ -246,7 +254,8 @@ function normalizeDateStr(s){
 // in. So shipping info lives in list.shipments[], not flat on the list.
 function newShipment(overrides){
   return Object.assign({ id: uid(), label: '', shipDate: '', weightKg: '', skidCount: '', shipFrom: '', contactName: '', contactPhone: '',
-    bookedCarrier: '', bookedRate: '', bookedBol: '', bolFile: null, lastRfqEmail: '', rfqLog: [], shippedAt: null }, overrides || {});
+    bookedCarrier: '', bookedRate: '', bookedBol: '', bolFile: null, lastRfqEmail: '', rfqLog: [], shippedAt: null,
+    poNum: '', fob: '', freightTerms: '', customerPickup: false, specialInstruction: '', packingSlipNo: null }, overrides || {});
 }
 // Remembers a site contact's phone number the first time it's typed on any
 // shipment, so the next product list's shipment form can suggest it instead
@@ -1614,11 +1623,60 @@ function jobReportHtml(j, first){
   }
   return h + '</section>';
 }
-function doPrint(html){
+function doPrint(html, orientation){
   const p = $('#print');
   p.className = '';
-  p.innerHTML = '<style>@page{size:letter landscape;margin:.4in}</style>' + html.replace(/<div class="pr-h"><h1>/g, '<div class="pr-h"><h1><img class="pr-logo" src="icons/logo-dark.png" alt="Modern Elevator">');
+  p.innerHTML = '<style>@page{size:letter ' + (orientation || 'landscape') + ';margin:.4in}</style>' + html.replace(/<div class="pr-h"><h1>/g, '<div class="pr-h"><h1><img class="pr-logo" src="icons/logo-dark.png" alt="Modern Elevator">');
   setTimeout(() => window.print(), 60);
+}
+// Builds the packing slip for one shipment (portrait, matching the paper
+// MEII packing slip pad) and sends it through the same print-to-PDF flow
+// as every other report - "Save as PDF" in the print dialog is how it
+// becomes a file to send out. "Qty shipped"/"Qty B.O." are read straight
+// off each line's own data, and lines fully on back order (nothing
+// shipping this round) are left off entirely, per how Zein wanted it.
+// Fields the app doesn't capture (Invoice To address detail, per-line
+// verification initials, print name/signature) are left blank for hand
+// fill, same as the rest of this app's printed paperwork.
+function packingSlipHtml(j, l, sp){
+  const items = (l.items || []).filter(ln => {
+    const q = parseFloat(ln.q) || 0, bo = parseFloat(ln.boQty) || 0;
+    return !(bo > 0 && bo >= q);
+  });
+  const qtyShipped = ln => {
+    const q = parseFloat(ln.q) || 0, bo = parseFloat(ln.boQty) || 0;
+    return bo > 0 ? Math.max(0, q - bo) : (ln.q || '');
+  };
+  return '<section class="ps">' +
+    '<div class="ps-top">' +
+    '<div class="ps-brand"><img class="ps-logo" src="icons/logo-dark.png" alt=""><div><div class="ps-co">MODERN ELEVATOR</div>' +
+    '<div class="ps-addr">1149 Pioneer Road, Burlington, ON L7M 1K5<br>tf: 1-866-448-6667&nbsp;&nbsp;t: 905-523-0040&nbsp;&nbsp;f: 905-523-0096</div></div></div>' +
+    '<div class="ps-no"><div class="ps-no-lbl">Packing Slip #:</div><div class="ps-no-val">' + esc(sp.packingSlipNo || '') + '</div></div></div>' +
+    '<div class="ps-twobox">' +
+    '<div class="ps-box"><div class="ps-boxhead">Invoice To:</div><div class="ps-lines">' + esc(j.customer || '') + '</div></div>' +
+    '<div class="ps-box"><div class="ps-boxhead">Ship To:</div><div class="ps-lines">' + esc(j.shipAddr || '').replace(/\n/g, '<br>') + '</div><div class="ps-tel">Tel#: ' + esc(sp.contactPhone || '') + '</div></div>' +
+    '</div>' +
+    '<table class="ps-info"><tbody><tr><th>CUSTOMER</th><th>PROJECT NAME</th><th>P.O#</th><th>M.E.I.#</th></tr>' +
+    '<tr><td>' + esc(j.customer || '') + '</td><td>' + esc(j.jobName || '') + '</td><td>' + esc(sp.poNum || '') + '</td><td>' + esc(j.jobNo || '') + '</td></tr>' +
+    '<tr><th>CONTACT</th><th>F.O.B.</th><th>DATE SHIPPED</th><th>SHIP VIA</th></tr>' +
+    '<tr><td>' + esc(sp.contactName || j.attn || '') + '</td><td>' + esc(sp.fob || '') + '</td><td>' + esc(sp.shipDate ? fmtDateLong(sp.shipDate) : '') + '</td><td>' + esc(sp.bookedCarrier || '') + '</td></tr></tbody></table>' +
+    '<div class="ps-freight"><b>FREIGHT TERMS:</b> ' + esc(sp.freightTerms || '') + '</div>' +
+    '<table class="ps-items"><thead><tr><th>Product #</th><th class="c">Qty</th><th>Description</th><th class="c">Qty Shipped</th><th>Verified By</th><th class="c">Qty B.O.</th></tr></thead><tbody>' +
+    (items.length ? items.map(ln => '<tr><td class="mono">' + esc(ln.p || '') + '</td><td class="c">' + esc(ln.q || '') + '</td><td>' + esc(ln.d || '') + '</td><td class="c">' + esc(qtyShipped(ln)) + '</td><td></td><td class="c">' + esc(ln.boQty || '') + '</td></tr>').join('') :
+      '<tr><td colspan="6" class="c">No lines shipping on this slip</td></tr>') +
+    '</tbody></table>' +
+    '<div class="ps-bottom2"><label class="ps-check">' + (sp.customerPickup ? '☑' : '☐') + ' Customer Pickup</label><div>Print Name:</div><div>Signature:</div></div>' +
+    '<div class="ps-special"><div class="ps-boxhead">Special Instruction</div><div>' + esc(sp.specialInstruction || '') + '</div></div>' +
+    '<table class="ps-info"><tbody><tr><th>WEIGHT</th><th># of SKIDS</th><th>Shipped by: (Print Name)</th><th>Signature</th></tr>' +
+    '<tr><td>' + esc(sp.weightKg ? sp.weightKg + ' kg' : '') + '</td><td>' + esc(sp.skidCount || '') + '</td><td></td><td></td></tr></tbody></table>' +
+    '<table class="ps-qa"><tbody><tr><td class="ps-qalabel">QA: Product List</td><td>Verified and Signed, included in attached envelope.</td><td class="c">Yes ☐</td><td class="c">No ☐</td></tr>' +
+    '<tr><td class="ps-qalabel">QA: Pictures</td><td>Digital Images have been taken for this Shipment.</td><td class="c">Yes ☐</td><td class="c">No ☐</td></tr></tbody></table>' +
+    '<div class="ps-claims"><b>CLAIMS:</b> No claims allowed in regards to quality and quantity unless made within 30 days of receipt of goods. Any claim is limited to the replacement of goods. Title of goods remains with seller until payment received. No goods will be accepted for return without authorization.</div>' +
+    '<div class="ps-copies">Accounting (White) &nbsp;&nbsp; Project File (Yellow) &nbsp;&nbsp; Customer (Pink)</div>' +
+    '</section>';
+}
+function printPackingSlip(j, l, sp){
+  doPrint(packingSlipHtml(j, l, sp), 'portrait');
 }
 // A short, purchasing-ready page (via the same print-to-PDF flow as every
 // other report in this app) for one laser cut list's sheet stock: just the
@@ -1839,6 +1897,13 @@ function editShipment(l, j, sp){
       '<a class="btn sm" href="' + sp.bolFile.dataUrl + '" target="_blank" rel="noopener" download="' + esc(sp.bolFile.name) + '">View</a>' +
       '<button class="btn sm danger" data-g="bolDel">Remove</button></div>'
       : '<div class="row"><button class="btn" data-g="bol">Attach BOL (photo or PDF)</button></div>') +
+    '<h3 class="small muted" style="margin-top:14px">PACKING SLIP' + (sp.packingSlipNo ? ' <span class="mono">#' + esc(sp.packingSlipNo) + '</span>' : '') + '</h3><div class="form">' +
+    '<div class="two"><label>P.O. #<input data-sf="poNum" value="' + esc(sp.poNum || '') + '"></label>' +
+    '<label>F.O.B.<input data-sf="fob" value="' + esc(sp.fob || '') + '"></label></div>' +
+    '<label>Freight terms<input data-sf="freightTerms" value="' + esc(sp.freightTerms || '') + '"></label>' +
+    '<label>Special instruction<textarea data-sf="specialInstruction" placeholder="e.g. Refer to product list for detail">' + esc(sp.specialInstruction || '') + '</textarea></label>' +
+    '<label class="chip" style="cursor:pointer;width:fit-content"><input type="checkbox" id="spPickup"' + (sp.customerPickup ? ' checked' : '') + '> Customer pickup</label></div>' +
+    '<div class="row" style="margin-top:4px"><span class="sp"></span><button class="btn" data-g="packSlip">Print packing slip (PDF)</button></div>' +
     '<h3 class="small muted" style="margin-top:14px">REQUEST A QUOTE</h3><div class="form">' +
     '<label>Carrier email<input id="rfqEmail" value="' + esc(sp.lastRfqEmail || '') + '" placeholder="dispatch@carrier.com" autocomplete="off"></label></div>' +
     '<div class="row" style="margin-top:4px"><span class="sp"></span><button class="btn" data-g="rfq">Email RFQ</button></div>' +
@@ -1856,6 +1921,7 @@ function editShipment(l, j, sp){
     const b = e.target.closest('[data-g]'); if(!b) return;
     const collect = () => {
       document.querySelectorAll('#sheet [data-sf]').forEach(i => sp[i.dataset.sf] = i.value.trim());
+      const pickupEl = $('#spPickup'); if(pickupEl) sp.customerPickup = pickupEl.checked;
       rememberContact(sp.contactName, sp.contactPhone);
     };
     if(b.dataset.g === 's'){
@@ -1883,6 +1949,12 @@ function editShipment(l, j, sp){
       collect();
       sp.bolFile = null;
       await saveList(l);
+      editShipment(l, j, sp);
+    } else if(b.dataset.g === 'packSlip'){
+      collect();
+      if(!sp.packingSlipNo) sp.packingSlipNo = nextPackingSlipNo();
+      await saveList(l);
+      printPackingSlip(j, l, sp);
       editShipment(l, j, sp);
     }
   };
