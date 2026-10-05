@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v21';
+const APP_VERSION = 'v22';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -53,7 +53,7 @@ window.Model = Model;
 const S = {
   jobs: [], lists: [], receipts: [], spools: [],
   set: { staff: ['M.I', 'Y.S', 'N.P', 'Z.M'], pin: '', openTabs: [], label: { w: 2, h: 1, dpi: 203 }, bins: [],
-    shipFrom: ['1149 Pioneer Rd, Burlington, ON', '3230 Mainway, Burlington, ON'], contacts: [], role: 'wl', packingSlipSeq: 0 },
+    shipFrom: ['1149 Pioneer Rd, Burlington, ON', '3230 Mainway, Burlington, ON'], contacts: [], role: 'wl', packingSlipSeq: 0, accountingEmail: '' },
   view: { name: 'dash' },
   ui: { dashFilter: 'active', dashSort: 'ship', dashQ: '', listFilter: {}, recvFilter: 'all', recvQ: '', recvView: 'stock', editLines: {}, recvType: 'job', draftPhoto: null, lastRecv: {}, spoolQ: '', spoolFilter: 'all', recvUomSheet: false }
 };
@@ -1448,7 +1448,7 @@ function viewImport(){
 function newLine(src, n){
   const ln = { id: uid(), n: n, g: src.g || '', p: (src.p || '').trim(), q: String(src.q || '').trim(), d: (src.d || '').trim(), conf: src.conf == null ? 1 : src.conf,
     fieldRects: src.fieldRects || null, pageIndex: src.pageIndex == null ? null : src.pageIndex, st: {}, pkQty: '', pkInit: '', pkTs: null, qcInit: '', qcTs: null,
-    skid: '', boxId: '', boQty: '', boInit: '', boDate: '', note: '' };
+    skid: '', boxId: '', boQty: '', boInit: '', boDate: '', note: '', shippedSpId: null, shippedAt: null };
   return ln;
 }
 function applyFilled(ln, filled){
@@ -1537,6 +1537,8 @@ function viewSettings(){
     '<div class="card"><h2>Ship-from addresses</h2><p class="muted small">Offered as the pickup address when building a freight RFQ.</p><div class="chips" style="margin:8px 0">' +
     (S.set.shipFrom || []).map((a, i) => '<span class="chip">' + esc(a) + ' <button class="btn sm ghost" data-act="shipFromDel" data-i="' + i + '">✕</button></span>').join('') + '</div>' +
     '<div class="row"><input class="search" id="shipFromNew" placeholder="e.g. 123 Example Rd, City, ON" style="min-width:220px"><button class="btn" data-act="shipFromAdd">Add</button></div></div>' +
+    '<div class="card"><h2>Accounting email</h2><p class="muted small">Shown on each shipment\'s "Send to Accounting" step as the suggested To: address for the product list / BOL / packing slip PDFs.</p>' +
+    '<div class="row"><input class="search" id="acctEmail" value="' + esc(S.set.accountingEmail || '') + '" placeholder="accounting@modernelevator.com" style="min-width:220px"><button class="btn" data-act="acctEmailSave">Save</button></div></div>' +
     '<div class="card"><h2>PIN</h2><p class="muted small">Needed to edit part # / qty / description, delete jobs, lists and received items, and restore backups. ' + (S.set.pin ? 'A PIN is set.' : 'No PIN set.') + '</p>' +
     '<div class="row"><input class="search" id="pinNew" inputmode="numeric" placeholder="New PIN (4+ digits)" style="min-width:160px"><button class="btn" data-act="pinSet">' + (S.set.pin ? 'Change' : 'Set') + ' PIN</button>' + (S.set.pin ? '<button class="btn danger" data-act="pinClear">Remove</button>' : '') + '</div></div>' +
     '<div class="card"><h2>Receiving labels</h2><div class="form"><div class="two"><label>Width (in)<input id="lw" value="' + esc(L.w) + '"></label><label>Height (in)<input id="lh" value="' + esc(L.h) + '"></label></div>' +
@@ -1629,24 +1631,40 @@ function doPrint(html, orientation){
   p.innerHTML = '<style>@page{size:letter ' + (orientation || 'landscape') + ';margin:.4in}</style>' + html.replace(/<div class="pr-h"><h1>/g, '<div class="pr-h"><h1><img class="pr-logo" src="icons/logo-dark.png" alt="Modern Elevator">');
   setTimeout(() => window.print(), 60);
 }
+// Which lines belong on a given shipment's packing slip: fully checked
+// off (every department signed + QC'd, nothing on back order - Model's
+// "done" status) and not already accounted for on an earlier shipment of
+// this same list. Once a slip is first printed for a shipment, the exact
+// set of lines it showed is frozen onto the shipment (sp.psLineIds) and
+// each of those lines is stamped shippedSpId/shippedAt - so a reprint
+// always shows the same lines (even after they're marked shipped, which
+// would otherwise make them disappear from the live "done & unshipped"
+// filter), and a later shipment for the same list (e.g. a B/O follow-up)
+// only picks up lines that have newly become done since.
+function packingSlipItems(l, sp){
+  if(sp.psLineIds){
+    const byId = new Map(l.items.map(ln => [ln.id, ln]));
+    return sp.psLineIds.map(id => byId.get(id)).filter(Boolean);
+  }
+  return (l.items || []).filter(ln => Model.lineStatus(ln) === 'done' && !ln.shippedSpId);
+}
+function markPackingSlipShipped(l, sp, items){
+  sp.psLineIds = items.map(ln => ln.id);
+  const ts = nowIso();
+  for(const ln of items){ ln.shippedSpId = sp.id; ln.shippedAt = ts; }
+}
 // Builds the packing slip for one shipment (portrait, matching the paper
 // MEII packing slip pad) and sends it through the same print-to-PDF flow
 // as every other report - "Save as PDF" in the print dialog is how it
-// becomes a file to send out. "Qty shipped"/"Qty B.O." are read straight
-// off each line's own data, and lines fully on back order (nothing
-// shipping this round) are left off entirely, per how Zein wanted it.
-// Fields the app doesn't capture (Invoice To address detail, per-line
-// verification initials, print name/signature) are left blank for hand
-// fill, same as the rest of this app's printed paperwork.
+// becomes a file to send out. Only lines that are fully checked off and
+// shipping on this shipment appear (see packingSlipItems above) - not
+// every line on the product list. Fields the app doesn't capture (Invoice
+// To address detail, per-line verification initials, print
+// name/signature) are left blank for hand fill, same as the rest of this
+// app's printed paperwork.
 function packingSlipHtml(j, l, sp){
-  const items = (l.items || []).filter(ln => {
-    const q = parseFloat(ln.q) || 0, bo = parseFloat(ln.boQty) || 0;
-    return !(bo > 0 && bo >= q);
-  });
-  const qtyShipped = ln => {
-    const q = parseFloat(ln.q) || 0, bo = parseFloat(ln.boQty) || 0;
-    return bo > 0 ? Math.max(0, q - bo) : (ln.q || '');
-  };
+  const items = packingSlipItems(l, sp);
+  const qtyShipped = ln => ln.q || '';
   return '<section class="ps">' +
     '<div class="ps-top">' +
     '<div class="ps-brand"><img class="ps-logo" src="icons/logo-dark.png" alt=""><div><div class="ps-co">MODERN ELEVATOR</div>' +
@@ -1677,6 +1695,52 @@ function packingSlipHtml(j, l, sp){
 }
 function printPackingSlip(j, l, sp){
   doPrint(packingSlipHtml(j, l, sp), 'portrait');
+}
+async function dataUrlToBlob(dataUrl){
+  const r = await fetch(dataUrl);
+  return r.blob();
+}
+function pdfFileName(parts){
+  return parts.filter(Boolean).join('_').replace(/\s+/g, '_').replace(/[^\w.-]/g, '') + '.pdf';
+}
+// Builds the three documents accounting needs for a shipment (product
+// list, BOL, packing slip) as real PDF files and hands them to the
+// tablet's native share sheet so they land pre-attached in whatever mail
+// app is picked (Web Share can't address/subject-line an email itself,
+// so the To: field still needs a tap - the accounting address from
+// Settings is included in the shared text as a reminder). Falls back to
+// just downloading the three files when Web Share (or file sharing) isn't
+// available on this browser/device.
+async function sendToAccounting(j, l, sp){
+  toast('Building PDFs…');
+  try{
+    const items = packingSlipItems(l, sp);
+    const slipBytes = await PdfExport.buildPackingSlip(j, l, sp, items);
+    const files = [
+      new File([await (async () => {
+        const rec = l.hasPdf ? await DB.get('pdfs', l.id) : null;
+        const srcBytes = rec ? new Uint8Array(await rec.bytes.arrayBuffer()) : null;
+        return (await PdfExport.build(j, l, srcBytes)).bytes;
+      })()], pdfFileName([j.jobNo, l.title || 'LIST', l.carNo]), { type: 'application/pdf' }),
+      new File([slipBytes], pdfFileName([j.jobNo, 'PACKING_SLIP', sp.packingSlipNo]), { type: 'application/pdf' })
+    ];
+    if(sp.bolFile && sp.bolFile.dataUrl){
+      const blob = await dataUrlToBlob(sp.bolFile.dataUrl);
+      files.splice(1, 0, new File([blob], sp.bolFile.name || 'BOL.pdf', { type: sp.bolFile.type || blob.type || 'application/pdf' }));
+    }
+    const subject = 'Shipment paperwork - ' + j.jobNo + (sp.label ? ' (' + sp.label + ')' : '') + ' - Packing Slip #' + (sp.packingSlipNo || '');
+    const body = subject + '\n\nProduct list' + (sp.bolFile ? ', BOL' : ' (no BOL on file)') + ' and packing slip attached for ' + j.jobNo + ' - ' + (j.jobName || '') +
+      (S.set.accountingEmail ? '\n\nTo: ' + S.set.accountingEmail : '');
+    if(navigator.canShare && navigator.canShare({ files })){
+      await navigator.share({ title: subject, text: body, files });
+      toast('Share sheet opened - pick Mail, fill in To:, and send');
+    } else {
+      for(const f of files) download(f, f.name);
+      toast('Sharing attachments isn’t supported on this browser - PDFs downloaded instead' + (S.set.accountingEmail ? '; attach them to an email to ' + S.set.accountingEmail : ''), true);
+    }
+  }catch(e){
+    toast('Could not prepare the PDFs: ' + e.message, true);
+  }
 }
 // A short, purchasing-ready page (via the same print-to-PDF flow as every
 // other report in this app) for one laser cut list's sheet stock: just the
@@ -1904,6 +1968,11 @@ function editShipment(l, j, sp){
     '<label>Special instruction<textarea data-sf="specialInstruction" placeholder="e.g. Refer to product list for detail">' + esc(sp.specialInstruction || '') + '</textarea></label>' +
     '<label class="chip" style="cursor:pointer;width:fit-content"><input type="checkbox" id="spPickup"' + (sp.customerPickup ? ' checked' : '') + '> Customer pickup</label></div>' +
     '<div class="row" style="margin-top:4px"><span class="sp"></span><button class="btn" data-g="packSlip">Print packing slip (PDF)</button></div>' +
+    '<h3 class="small muted" style="margin-top:14px">SEND TO ACCOUNTING</h3>' +
+    '<p class="small muted">Builds the product list, BOL and packing slip as PDFs and hands them to your tablet\'s share sheet, ready to attach to an email' +
+    (S.set.accountingEmail ? ' to <b>' + esc(S.set.accountingEmail) + '</b>' : '') + ' — pick Mail/Gmail and fill in the To: field, everything else is ready.' +
+    (S.set.accountingEmail ? '' : ' <a href="javascript:void 0" data-g="goAcctSet">Set the accounting address</a> in Settings.') + '</p>' +
+    '<div class="row"><span class="sp"></span><button class="btn dark" data-g="sendAcct">Send to Accounting</button></div>' +
     '<h3 class="small muted" style="margin-top:14px">REQUEST A QUOTE</h3><div class="form">' +
     '<label>Carrier email<input id="rfqEmail" value="' + esc(sp.lastRfqEmail || '') + '" placeholder="dispatch@carrier.com" autocomplete="off"></label></div>' +
     '<div class="row" style="margin-top:4px"><span class="sp"></span><button class="btn" data-g="rfq">Email RFQ</button></div>' +
@@ -1934,6 +2003,8 @@ function editShipment(l, j, sp){
       l.shipments = l.shipments.filter(x => x !== sp);
       await saveList(l);
       if(l.shipments.length) drawShipList(l, j); else { closeSheet(); render(); }
+    } else if(b.dataset.g === 'goAcctSet'){
+      collect(); await saveList(l); closeSheet(); go({ name: 'settings' });
     } else if(b.dataset.g === 'rfq'){
       collect();
       const email = ($('#rfqEmail').value || '').trim();
@@ -1952,9 +2023,21 @@ function editShipment(l, j, sp){
       editShipment(l, j, sp);
     } else if(b.dataset.g === 'packSlip'){
       collect();
-      if(!sp.packingSlipNo) sp.packingSlipNo = nextPackingSlipNo();
+      if(!sp.packingSlipNo){
+        sp.packingSlipNo = nextPackingSlipNo();
+        markPackingSlipShipped(l, sp, packingSlipItems(l, sp));
+      }
       await saveList(l);
       printPackingSlip(j, l, sp);
+      editShipment(l, j, sp);
+    } else if(b.dataset.g === 'sendAcct'){
+      collect();
+      if(!sp.packingSlipNo){
+        sp.packingSlipNo = nextPackingSlipNo();
+        markPackingSlipShipped(l, sp, packingSlipItems(l, sp));
+      }
+      await saveList(l);
+      await sendToAccounting(j, l, sp);
       editShipment(l, j, sp);
     }
   };
@@ -2310,6 +2393,7 @@ const A = {
   staffDel: b => { S.set.staff.splice(+b.dataset.i, 1); saveSet('staff'); render(); },
   shipFromAdd: () => { const v = $('#shipFromNew').value.trim(); if(!v) return; S.set.shipFrom = S.set.shipFrom || []; if(!S.set.shipFrom.includes(v)) S.set.shipFrom.push(v); saveSet('shipFrom'); render(); },
   shipFromDel: b => { S.set.shipFrom.splice(+b.dataset.i, 1); saveSet('shipFrom'); render(); },
+  acctEmailSave: () => { S.set.accountingEmail = ($('#acctEmail').value || '').trim(); saveSet('accountingEmail'); toast('Saved'); },
   pinSet: async () => {
     const v = $('#pinNew').value.trim();
     if(!/^\d{4,8}$/.test(v)) return toast('PIN must be 4–8 digits', true);
