@@ -92,8 +92,11 @@ button.stat:active{border-color:var(--ink)}
 .jhead .kv span{color:var(--mute)}
 .jpct{text-align:right}
 .jpct b{font:700 40px/1 ui-monospace,monospace}
-.subtabs{display:flex;gap:6px;margin:14px 0 0;overflow-x:auto;border-bottom:2px solid var(--line)}
+.subtabsRow{display:flex;align-items:stretch;margin:14px 0 0;border-bottom:2px solid var(--line);gap:0}
+.subtabs{display:flex;gap:6px;overflow-x:auto;flex:1 1 auto;min-width:0}
+.subtabActions{display:flex;gap:6px;flex-shrink:0;padding-left:6px}
 .subtab{border:1.5px solid var(--hair);border-bottom:0;border-radius:8px 8px 0 0;background:#f6f7f4;padding:9px 14px;cursor:pointer;font-weight:700;font-size:13px;white-space:nowrap;display:flex;gap:8px;align-items:center}
+.subtab.addbtn{background:var(--ink,#1a1a1a);color:#fff;border-color:var(--ink,#1a1a1a)}
 .subtab.on{background:var(--card);border-color:var(--line);position:relative;top:2px;padding-bottom:11px}
 .subtab .sw{width:12px;height:12px;border-radius:3px;border:1px solid rgba(0,0,0,.2)}
 .panel{background:var(--card);border:1px solid var(--line);border-top:0;border-radius:0 0 10px 10px;padding:12px}

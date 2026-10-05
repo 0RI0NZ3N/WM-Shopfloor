@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v17';
+const APP_VERSION = 'v18';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -485,17 +485,18 @@ function viewJob(){
     '<div class="jpct"><b>' + pct(s.pct) + '</b><div class="muted small">' + s.done + '/' + s.total + ' lines done · ' + s.bo + ' on B/O' + (jobNextShip(j) ? ' · next ship ' + esc(fmtDateLong(jobNextShip(j))) + ' ' + shipBadge(jobNextShip(j)) : '') + '</div>' +
     (laser ? '' : '<div class="row" style="justify-content:flex-end;margin-top:8px">' +
     (jobShipStats(j).total ? '<button class="btn sm" data-act="jobShipments" data-id="' + esc(j.id) + '">Shipments (' + jobShipStats(j).shipped + '/' + jobShipStats(j).total + ' shipped)</button>' : '') +
-    '<button class="btn sm" data-act="printJob">Print job report</button><button class="btn sm" data-act="jobInfo">Job info</button></div>') + '</div>';
-  h += '<div class="subtabs">' + ls.map(l => {
+    '<button class="btn sm" data-act="printJob">Print job report</button><button class="btn sm" data-act="jobInfo">Job info</button></div>') + '</div></div>';
+  h += '<div class="subtabsRow"><div class="subtabs">' + ls.map(l => {
     const st = Model.listStats(l);
     return '<button class="subtab' + (sub === l.id ? ' on' : '') + '" data-act="sub" data-k="' + l.id + '"><span class="sw" style="background:' + gColor(l.groupKey) + '"></span>' +
       esc(l.title || 'PRODUCT LIST') + (l.carNo ? ' · CAR ' + esc(l.carNo) : '') + ' <span class="muted mono">' + pct(st.pct) + '</span></button>';
   }).join('') +
-    (laser ? '' : '<button class="subtab' + (sub === 'material' ? ' on' : '') + '" data-act="sub" data-k="material">Material (' + recs.length + (s.unmatched ? ' · ' + s.unmatched + ' unmatched' : '') + ')</button>' +
-    '<button class="subtab" data-act="importList" data-job="' + esc(j.id) + '">+ Add list</button>') +
+    (laser ? '' : '<button class="subtab' + (sub === 'material' ? ' on' : '') + '" data-act="sub" data-k="material">Material (' + recs.length + (s.unmatched ? ' · ' + s.unmatched + ' unmatched' : '') + ')</button>') +
     laserLists.map(l => '<button class="subtab' + (sub === l.id ? ' on' : '') + '" data-act="sub" data-k="' + l.id + '"><span class="sw" style="background:' + gColor('LASER') + '"></span>' +
       esc(l.title || 'LASER CUT LIST') + ' <span class="muted mono">' + l.items.length + ' pcs</span></button>').join('') +
-    '<button class="subtab" data-act="uploadLaser" data-job="' + esc(j.id) + '">+ Add cut list</button></div>';
+    '</div><div class="subtabActions">' +
+    (laser ? '' : '<button class="subtab addbtn" data-act="importList" data-job="' + esc(j.id) + '">+ Add list</button>') +
+    '<button class="subtab addbtn" data-act="uploadLaser" data-job="' + esc(j.id) + '">+ Add cut list</button></div></div>';
   const curLaser = laserLists.find(l => l.id === sub);
   h += '<div class="panel">' + (sub === 'material' ? viewMaterial(j, recs) : curLaser ? viewLaserList(j, curLaser) : viewList(j, S.lists.find(l => l.id === sub), laser)) + '</div>';
   return h;
