@@ -1,5 +1,5 @@
 /* Offline cache. Bump VERSION on every deploy so tablets pick up the new build. */
-const VERSION = 'meii-shopfloor-v19';
+const VERSION = 'meii-shopfloor-v20';
 const FILES = ['./', 'index.html', 'styles.css', 'app.js', 'db.js', 'parse.js', 'moveparse.js', 'ocr.js', 'pdfexport.js', 'zebra.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/logo-light.png', 'icons/logo-dark.png', 'icons/favicon.png', 'icons/apple-touch-icon.png', 'vendor/qrcode.js', 'vendor/jsqr.js', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs', 'vendor/pdf-lib.min.js',
   'vendor/tesseract-lib.js', 'vendor/tesseract-core.wasm', 'vendor/tesseract-core-fallback.wasm', 'vendor/eng.traineddata'];

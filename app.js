@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v19';
+const APP_VERSION = 'v20';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -98,15 +98,32 @@ function sheetDesc(material, thick, size){
   const s = sheetSizeInfo(size);
   return (material || '').trim().toUpperCase() + ' ' + (parseFloat(thick) || 0).toFixed(3) + '" SHEET (' + s.label + ')';
 }
+// Picks the better of the standard sheet sizes for one material+thickness
+// group, automatically - no one has to choose. Scores each size by current
+// on-hand stock of that exact material+thickness+size (live against
+// S.receipts, so this shifts on its own as stock comes in or gets used,
+// never pinned by hand): prefers whichever size leaves the smallest
+// shortfall against what's actually on the shelf, tie-broken by whichever
+// needs fewer total sheets (less to buy/waste), tie-broken by whichever has
+// more on hand (use up what's already there first).
+function pickSheetSizeFor(material, thick, totalArea){
+  const groupKey = sheetGroupKey(material, thick);
+  const options = SHEET_SIZES.map(s => {
+    const sheetsNeeded = totalArea ? Math.ceil(totalArea / sheetSizeArea(s.key)) : 0;
+    const onHand = S.receipts.filter(r => r.type === 'stock' && r.uom === 'SHEET' && sheetGroupKey(r.sheetMaterial, r.sheetThick) === groupKey && (r.sheetSize || SHEET_SIZES[0].key) === s.key)
+      .reduce((a, r) => a + onHandQty(r), 0);
+    return { size: s.key, sheetsNeeded, onHand, shortfall: Math.max(0, sheetsNeeded - onHand) };
+  });
+  options.sort((a, b) => a.shortfall - b.shortfall || a.sheetsNeeded - b.sheetsNeeded || b.onHand - a.onHand);
+  return options[0];
+}
 // One row per material+thickness combo found on the cut list: how much area
-// it all adds up to, how many whole sheets (of the chosen size) that
-// naively takes (no real nesting - just total area / sheet area, rounded
-// up), and what's left over on the last sheet once rounded. Deliberately
-// rough, per the ask. sizeKey picks which standard sheet size to count
-// against - a per-list ordering choice, defaults to 48x96.
-function computeSheetGroups(items, sizeKey){
-  sizeKey = sizeKey || SHEET_SIZES[0].key;
-  const area1 = sheetSizeArea(sizeKey);
+// it all adds up to, which standard sheet size is the best fit for it right
+// now (see pickSheetSizeFor), how many whole sheets of that size it naively
+// takes (no real nesting - just total area / sheet area, rounded up), and
+// what's left over on the last sheet once rounded. Deliberately rough, per
+// the ask.
+function computeSheetGroups(items){
   const groups = {};
   for(const it of items){
     const area = (parseFloat(it.width) || 0) * (parseFloat(it.length) || 0);
@@ -117,9 +134,13 @@ function computeSheetGroups(items, sizeKey){
     groups[key].parts.push(it);
   }
   return Object.values(groups).map(g => {
-    g.sheetsNeeded = g.totalArea ? Math.ceil(g.totalArea / area1) : 0;
+    const pick = pickSheetSizeFor(g.material, g.thick, g.totalArea);
+    g.sheetSize = pick.size;
+    g.sheetsNeeded = pick.sheetsNeeded;
+    g.onHand = pick.onHand;
+    g.shortfall = pick.shortfall;
+    const area1 = sheetSizeArea(pick.size);
     g.leftoverArea = g.sheetsNeeded ? g.sheetsNeeded * area1 - g.totalArea : 0;
-    g.sheetSize = sizeKey;
     return g;
   }).sort((a, b) => b.totalArea - a.totalArea);
 }
@@ -617,9 +638,8 @@ function viewLaserList(j, list){
     return '<div class="empty"><h2>No laser cut list yet</h2><p class="muted">Upload the laser cut list PDF for this job to work out sheet material needed.</p>' +
       '<button class="btn primary" data-act="uploadLaser" data-job="' + esc(j.id) + '">+ Upload cut list</button></div>';
   }
-  const sizeKey = list.sheetSize || SHEET_SIZES[0].key;
-  const sizeLbl = sheetSizeInfo(sizeKey).label;
-  const groups = computeSheetGroups(list.items, sizeKey);
+  const groups = computeSheetGroups(list.items);
+  const areaByGroup = {}; groups.forEach(g => { areaByGroup[g.key] = sheetSizeArea(g.sheetSize); });
   const h0 = list.header || {};
   let h = '<div class="titlebar" style="background:' + gColor('LASER') + ';color:' + gInk('LASER') + '">' + esc(list.title || 'LASER CUT LIST') + '</div>' +
     '<div class="ltool"><span class="muted small">' + (h0.by ? 'By ' + esc(h0.by) + ' · ' : '') + (h0.elevatorNo ? 'Elevator ' + esc(h0.elevatorNo) + ' · ' : '') +
@@ -627,21 +647,21 @@ function viewLaserList(j, list){
     '<button class="btn sm" data-act="uploadLaser" data-job="' + esc(j.id) + '" data-list="' + list.id + '">Update from PDF</button>' +
     '<button class="btn sm" data-act="pullSheets" data-list="' + list.id + '">Re-check stock</button>' +
     '<button class="btn sm" data-act="printSheetOrder" data-list="' + list.id + '">Download order list (PDF)</button></div>';
-  h += '<div class="card" style="margin:10px 0"><div class="row" style="justify-content:space-between;flex-wrap:wrap"><h3 style="margin:0">Sheet requirements <span class="muted small">(total area ÷ sheet area, rounded up; not real nesting)</span></h3>' +
-    '<label class="small" style="display:flex;gap:6px;align-items:center">Sheet size<select data-set-sheet-size="' + list.id + '">' + SHEET_SIZES.map(s => '<option value="' + s.key + '"' + (s.key === sizeKey ? ' selected' : '') + '>' + s.label + '</option>').join('') + '</select></label></div>' +
-    '<table class="list"><thead><tr><th>Material</th><th>Thick (in)</th><th>Total area (in²)</th><th>Sheets needed (' + esc(sizeLbl) + ')</th><th>Pulled from stock</th><th>Status</th><th>Drop-piece suggestion</th></tr></thead><tbody>' +
+  h += '<div class="card" style="margin:10px 0"><h3 style="margin:0 0 4px">Sheet requirements <span class="muted small">(total area ÷ sheet area, rounded up; not real nesting)</span></h3>' +
+    '<p class="muted small" style="margin:0 0 10px">Sheet size is picked automatically per material, based on what\'s on hand right now - whichever standard size leaves the smallest shortfall, so it shifts on its own as stock changes. Click Re-check stock after receiving more to re-evaluate.</p>' +
+    '<table class="list"><thead><tr><th>Material</th><th>Thick (in)</th><th>Total area (in²)</th><th>Sheet size</th><th>Sheets needed</th><th>On hand (that size)</th><th>Pulled from stock</th><th>Status</th><th>Drop-piece suggestion</th></tr></thead><tbody>' +
     (groups.length ? groups.map(g => {
-      const pullKey = g.key + '|' + sizeKey;
+      const pullKey = g.key + '|' + g.sheetSize;
       const pulled = ((list.sheetPulls || {})[pullKey] || {}).totalPulled || 0;
       const short = Math.max(0, g.sheetsNeeded - pulled);
-      return '<tr><td>' + esc(g.material || '—') + '</td><td>' + g.thick.toFixed(3) + '</td><td>' + Math.round(g.totalArea).toLocaleString() + '</td><td><b>' + g.sheetsNeeded + '</b></td><td>' + pulled + '</td>' +
+      return '<tr><td>' + esc(g.material || '—') + '</td><td>' + g.thick.toFixed(3) + '</td><td>' + Math.round(g.totalArea).toLocaleString() + '</td><td><b>' + esc(sheetSizeInfo(g.sheetSize).label) + '</b></td><td><b>' + g.sheetsNeeded + '</b></td><td>' + g.onHand + '</td><td>' + pulled + '</td>' +
         '<td>' + (short ? '<span class="tag warn">' + short + ' short - buy more</span>' : '<span class="tag ok">covered</span>') + '</td>' +
         '<td class="small muted">' + esc(dropPieceHint(g) || '—') + '</td></tr>';
-    }).join('') : '<tr><td colspan="7" class="muted" style="text-align:center;padding:20px">No parts with a material/thickness yet.</td></tr>') + '</tbody></table></div>';
+    }).join('') : '<tr><td colspan="9" class="muted" style="text-align:center;padding:20px">No parts with a material/thickness yet.</td></tr>') + '</tbody></table></div>';
   h += '<div class="twrap"><table class="sheet"><thead><tr><th>Grp</th><th>Product #</th><th>Description</th><th>Qty</th><th>Width</th><th>Length</th><th>Thick</th><th>Gauge</th><th>Material</th><th>Finish</th><th>Area ea (in²)</th><th>Sheets (this line)</th><th>Laser</th></tr></thead><tbody>' +
     list.items.map(it => {
       const qty = parseFloat(it.qty) || 0, area = it.area || 0;
-      const lineSheets = area && qty ? (area * qty / sheetSizeArea(sizeKey)) : 0;
+      const lineSheets = area && qty ? (area * qty / (areaByGroup[it.sheetKey] || sheetSizeArea(SHEET_SIZES[0].key))) : 0;
       const on = !!it.laserOn;
       return '<tr data-row="' + it.id + '"><td>' + esc((it.group || '').replace('Group ', 'G')) + '</td><td class="mono small">' + esc(it.productNo || '') + '</td><td>' + esc(it.description || '') + '</td><td>' + esc(it.qty || '') + '</td>' +
         '<td>' + esc(it.width || '') + '</td><td>' + esc(it.length || '') + '</td><td>' + esc(it.thick || '') + '</td><td>' + esc(it.gauge || '') + '</td><td>' + esc(it.material || '') + '</td><td>' + esc(it.finish || '') + '</td>' +
@@ -676,16 +696,15 @@ function pickLaserSign(list, ln){
 // never withdraws more than what's on hand - the gap is reported as a
 // shortfall so buying and job priority can be decided from it.
 async function pullSheetsFromStock(list){
-  const sizeKey = list.sheetSize || SHEET_SIZES[0].key;
-  const groups = computeSheetGroups(list.items, sizeKey);
+  const groups = computeSheetGroups(list.items);
   list.sheetPulls = list.sheetPulls || {};
   let anyPulled = false, anyShort = false;
   for(const g of groups){
-    const pullKey = g.key + '|' + sizeKey;
+    const pullKey = g.key + '|' + g.sheetSize;
     const rec = list.sheetPulls[pullKey] || { totalPulled: 0 };
     const need = g.sheetsNeeded - rec.totalPulled;
     if(need <= 0) continue;
-    const stock = S.receipts.filter(r => r.type === 'stock' && r.uom === 'SHEET' && sheetGroupKey(r.sheetMaterial, r.sheetThick) === g.key && (r.sheetSize || SHEET_SIZES[0].key) === sizeKey && onHandQty(r) > 0)
+    const stock = S.receipts.filter(r => r.type === 'stock' && r.uom === 'SHEET' && sheetGroupKey(r.sheetMaterial, r.sheetThick) === g.key && (r.sheetSize || SHEET_SIZES[0].key) === g.sheetSize && onHandQty(r) > 0)
       .sort((a, b) => (a.receivedAt || '').localeCompare(b.receivedAt || ''));
     let remaining = need; const touched = [];
     for(const r of stock){
@@ -734,12 +753,12 @@ async function importLaserList(file, target){
   });
   if(!list){
     list = { id: uid(), jobId: j.id, kind: 'laser', title: r.header.title || 'LASER CUT LIST', carNo: '', groupKey: 'LASER', rev: r.header.rev || '',
-      header: r.header, items, sheetPulls: {}, sheetSize: SHEET_SIZES[0].key, importedAt: nowIso(), mode: 'laser' };
+      header: r.header, items, sheetPulls: {}, importedAt: nowIso(), mode: 'laser' };
     S.lists.push(list);
   } else {
     list.header = r.header; list.title = r.header.title || list.title; list.rev = r.header.rev || list.rev; list.items = items; list.importedAt = nowIso();
   }
-  computeSheetGroups(list.items, list.sheetSize);
+  computeSheetGroups(list.items);
   await saveList(list);
   await pullSheetsFromStock(list);
   go({ name: 'job', jobId: j.id, sub: list.id });
@@ -1604,25 +1623,24 @@ function doPrint(html){
 // A short, purchasing-ready page (via the same print-to-PDF flow as every
 // other report in this app) for one laser cut list's sheet stock: just the
 // sheet types actually short, with a qty to order, plus the full
-// requirement detail underneath for reference. Sized against whichever
-// sheet size is currently selected on the cut list.
+// requirement detail underneath for reference. Each row's sheet size is
+// whichever standard size that material/thickness is currently best
+// matched to (see pickSheetSizeFor) - not a single size for the whole list.
 function printSheetOrder(list){
   const j = job(list.jobId);
-  const sizeKey = list.sheetSize || SHEET_SIZES[0].key;
-  const sizeLbl = sheetSizeInfo(sizeKey).label;
-  const rows = computeSheetGroups(list.items, sizeKey).filter(g => g.sheetsNeeded > 0).map(g => {
-    const pulled = ((list.sheetPulls || {})[g.key + '|' + sizeKey] || {}).totalPulled || 0;
+  const rows = computeSheetGroups(list.items).filter(g => g.sheetsNeeded > 0).map(g => {
+    const pulled = ((list.sheetPulls || {})[g.key + '|' + g.sheetSize] || {}).totalPulled || 0;
     return { ...g, pulled, short: Math.max(0, g.sheetsNeeded - pulled) };
   });
   const toOrder = rows.filter(g => g.short > 0);
   let h = '<section><div class="pr-h"><h1>MEII Shop Floor — Material order list</h1><span>' + esc(new Date().toLocaleString()) + '</span></div>' +
-    '<p>' + esc((j ? j.jobNo + (j.jobName ? ' — ' + j.jobName : '') : 'Job not found') + ' · ' + (list.title || 'LASER CUT LIST') + ' · sheet size ' + sizeLbl) + '</p>' +
+    '<p>' + esc((j ? j.jobNo + (j.jobName ? ' — ' + j.jobName : '') : 'Job not found') + ' · ' + (list.title || 'LASER CUT LIST')) + ' · sheet size picked automatically per material, based on current stock</p>' +
     '<table><thead><tr><th>Material</th><th class="c">Thickness (in)</th><th class="c">Sheet size</th><th class="c">Qty to order</th></tr></thead><tbody>' +
-    (toOrder.length ? toOrder.map(g => '<tr><td>' + esc(g.material || '—') + '</td><td class="c">' + g.thick.toFixed(3) + '</td><td class="c">' + esc(sizeLbl) + '</td><td class="c"><b>' + g.short + '</b></td></tr>').join('') :
+    (toOrder.length ? toOrder.map(g => '<tr><td>' + esc(g.material || '—') + '</td><td class="c">' + g.thick.toFixed(3) + '</td><td class="c">' + esc(sheetSizeInfo(g.sheetSize).label) + '</td><td class="c"><b>' + g.short + '</b></td></tr>').join('') :
       '<tr><td colspan="4">Nothing to order - stock covers every sheet type on this list.</td></tr>') +
     '</tbody></table>' +
-    (rows.length ? '<h2 style="margin-top:20px">Full requirement detail</h2><table><thead><tr><th>Material</th><th class="c">Thickness (in)</th><th class="c">Sheets needed</th><th class="c">Pulled from stock</th><th class="c">Short</th></tr></thead><tbody>' +
-      rows.map(g => '<tr><td>' + esc(g.material || '—') + '</td><td class="c">' + g.thick.toFixed(3) + '</td><td class="c">' + g.sheetsNeeded + '</td><td class="c">' + g.pulled + '</td><td class="c">' + g.short + '</td></tr>').join('') +
+    (rows.length ? '<h2 style="margin-top:20px">Full requirement detail</h2><table><thead><tr><th>Material</th><th class="c">Thickness (in)</th><th class="c">Sheet size</th><th class="c">Sheets needed</th><th class="c">Pulled from stock</th><th class="c">Short</th></tr></thead><tbody>' +
+      rows.map(g => '<tr><td>' + esc(g.material || '—') + '</td><td class="c">' + g.thick.toFixed(3) + '</td><td class="c">' + esc(sheetSizeInfo(g.sheetSize).label) + '</td><td class="c">' + g.sheetsNeeded + '</td><td class="c">' + g.pulled + '</td><td class="c">' + g.short + '</td></tr>').join('') +
       '</tbody></table>' : '') +
     '</section>';
   doPrint(h);
@@ -2265,9 +2283,6 @@ document.addEventListener('change', async e => {
   if(t.id === 'recvUom'){
     S.ui.recvUomSheet = t.value === 'SHEET';
     keepForm(render);
-  } else if(t.dataset.setSheetSize){
-    const l = S.lists.find(x => x.id === t.dataset.setSheetSize);
-    if(l){ l.sheetSize = t.value; await saveList(l); render(); }
   } else if(t.dataset.lf){
     const l = curList(); const ln = l && l.items.find(x => x.id === t.dataset.l); if(!ln) return;
     const k = t.dataset.lf, v = t.value.trim();
