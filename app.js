@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v23';
+const APP_VERSION='v24';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -600,6 +600,9 @@ function viewList(j, list, laserOnly){
     (laserOnly ? '<span class="tag">View only - sign the Laser column</span>' :
     '<button class="btn sm" data-act="exportPdf">Export filled PDF</button>' +
     '<button class="btn sm" data-act="importList" data-job="' + esc(j.id) + '" data-list="' + list.id + '">Update from PDF</button>' +
+    '<button class="btn sm" data-act="importList" data-job="' + esc(j.id) + '" data-list="' + list.id + '" data-append="1">+ Add pages</button>' +
+    '<button class="btn sm" data-act="mergeList">Merge list…</button>' +
+    '<button class="btn sm danger" data-act="delList">Delete list</button>' +
     '<button class="btn sm" data-act="listInfo">Signatures</button>' +
     '<button class="btn sm' + (edit ? ' dark' : '') + '" data-act="editLines">' + (edit ? 'Done editing' : 'Edit lines') + '</button>') + '</div>';
   if(!laserOnly) h += '<div class="ltool"><span class="muted small">' + shipSummaryHtml(list) + '</span><span class="sp"></span><button class="btn sm" data-act="listShip">Shipping</button></div>';
@@ -1423,12 +1426,14 @@ function viewImport(){
   const ex = IMP.target.listId ? { l: S.lists.find(x => x.id === IMP.target.listId) } : existingFor(h);
   if(ex.l && !ex.j) ex.j = job(ex.l.jobId);
   let html = '<div class="row"><h1>Review import</h1><span class="sp"></span><button class="btn" data-act="goDash">Cancel</button><button class="btn primary" data-act="commitImport">' +
-    (ex.l && IMP.mode !== 'new' ? 'Update ' + esc(ex.j.jobNo) + ' list' : ex.j ? 'Add list to ' + esc(ex.j.jobNo) : 'Create job tab') + '</button></div>';
+    (IMP.target.append && ex.l ? 'Add to ' + esc(ex.j.jobNo) + ' list' : ex.l && IMP.mode !== 'new' ? 'Update ' + esc(ex.j.jobNo) + ' list' : ex.j ? 'Add list to ' + esc(ex.j.jobNo) : 'Create job tab') + '</button></div>';
   html += '<p class="muted">' + esc(IMP.files) + ' · ' + (r.mode === 'text' ? '<b>read exactly from the PDF text</b>' : '<b>read with OCR</b> — check highlighted lines') + ' · ' + r.lines.length + ' lines</p>';
   for(const n of r.notes) html += '<div class="note">' + esc(n) + '</div>';
   if(filledN) html += '<div class="note">Found <b>' + filledN + '</b> filled-in values in the Packaging / QC / Back order cells of this document. They will be applied to the matching lines.</div>';
   if(low) html += '<div class="note warn"><b>' + low + '</b> lines were hard to read — highlighted in yellow. Fix them before saving.</div>';
-  if(ex.l){
+  if(IMP.target.append && ex.l){
+    html += '<div class="note">These <b>' + r.lines.length + '</b> lines will be <b>added to the end of</b> <b>' + esc(ex.l.title) + (ex.l.carNo ? ' · CAR ' + esc(ex.l.carNo) : '') + '</b> (' + ex.l.items.length + ' lines now). Existing lines and sign-offs are not touched. Delete any duplicate lines below before saving.</div>';
+  } else if(ex.l){
     html += '<div class="note">This matches the existing list <b>' + esc(ex.l.title) + (ex.l.carNo ? ' · CAR ' + esc(ex.l.carNo) : '') + '</b> on job <b>' + esc(ex.j.jobNo) + '</b>. ' +
       '<div class="chips" style="margin-top:6px"><button class="chip' + (IMP.mode !== 'new' ? ' on' : '') + '" data-act="impMode" data-k="auto">Update it (keeps all sign-offs)</button>' +
       '<button class="chip' + (IMP.mode === 'new' ? ' on' : '') + '" data-act="impMode" data-k="new">Add as a separate list</button></div></div>';
@@ -1480,6 +1485,19 @@ async function commitImport(){
   }
   await saveJob(j);
   let list, applied = 0, carried = 0, dropped = 0;
+  if(IMP.target.append && ex.l){
+    // Add pages: new lines go on the end, numbered on from the last line.
+    // Nothing already on the list (sign-offs, shipments, header) is changed.
+    list = ex.l;
+    let n = Math.max(0, ...list.items.map(x => +x.n || 0));
+    for(const src of lines){ const ln = newLine(src, ++n); applied += applyFilled(ln, src.filled); list.items.push(ln); }
+    if(list.hasPdf){ list.hasPdf = false; await DB.del('pdfs', list.id); }
+    await saveList(list);
+    const added = lines.length;
+    IMP = null;
+    openJobTab(j.id, list.id);
+    return toast('Added ' + added + ' lines to the end of ' + list.title + ' (now ' + list.items.length + ')');
+  }
   if(ex.l && IMP.mode !== 'new'){
     list = ex.l;
     const old = list.items.slice();
@@ -1524,6 +1542,34 @@ async function commitImport(){
   IMP = null;
   openJobTab(j.id, list.id);
   toast(msg);
+}
+
+/* Merge another list on the same job into the open one (e.g. a 2-page
+   product list that was photographed as two separate lists). Lines keep their
+   sign-offs, shipment history and received-material matches. */
+function mergeListSheet(){
+  const l = curList(); if(!l) return;
+  const others = listsOf(l.jobId).filter(x => x.id !== l.id);
+  if(!others.length) return toast('There is no other list on this job to merge in', true);
+  openSheet('<h2>Merge a list into ' + esc(l.title) + '</h2><p class="muted small">Pick the list to pull in. Its lines are added to the end of this one, then that list is removed.</p>' +
+    '<div class="opts">' + others.map(o => '<button class="opt" data-m="' + o.id + '"><b>' + esc(o.title) + '</b>' + (o.carNo ? ' · CAR ' + esc(o.carNo) : '') + ' · ' + o.items.length + ' lines</button>').join('') + '</div>' +
+    '<div class="row" style="margin-top:12px"><span class="sp"></span><button class="btn" data-m="x">Cancel</button></div>');
+  $('#sheet').onclick = async e => {
+    const b = e.target.closest('[data-m]'); if(!b) return;
+    closeSheet(); if(b.dataset.m === 'x') return;
+    const src = S.lists.find(x => x.id === b.dataset.m); if(!src) return;
+    if(!(await askPin('Merge lists'))) return;
+    if(!(await confirmSheet('Merge ' + src.title + ' into ' + l.title + '?', src.items.length + ' lines will be added to the end of this list and ' + esc(src.title) + ' will be removed.', 'Merge', true))) return;
+    let n = Math.max(0, ...l.items.map(x => +x.n || 0));
+    for(const ln of src.items){ ln.n = ++n; l.items.push(ln); }
+    l.shipments = (l.shipments || []).concat(src.shipments || []);
+    if(l.hasPdf){ l.hasPdf = false; await DB.del('pdfs', l.id); }
+    for(const r of S.receipts) if((r.matches || []).some(m => m.listId === src.id)){ r.matches.forEach(m => { if(m.listId === src.id) m.listId = l.id; }); await saveReceipt(r); }
+    S.lists = S.lists.filter(x => x !== src); await DB.del('lists', src.id); await DB.del('pdfs', src.id);
+    await saveList(l);
+    S.view.sub = l.id; render();
+    toast('Merged ' + src.items.length + ' lines into ' + l.title + ' (now ' + l.items.length + ')');
+  };
 }
 
 /* ================= settings / backup ================= */
@@ -2341,7 +2387,8 @@ const A = {
   dashSort: b => { S.ui.dashSort = b.dataset.k; render(); },
   sub: b => { S.view.sub = b.dataset.k; closeDrawer(); render(); },
   lfilter: b => { S.ui.listFilter[S.view.sub] = b.dataset.k; render(); },
-  importList: b => { IMP_TARGET = { jobId: b.dataset.job, listId: b.dataset.list }; $('#fileList').value = ''; $('#fileList').click(); },
+  importList: b => { IMP_TARGET = { jobId: b.dataset.job, listId: b.dataset.list, append: !!b.dataset.append }; $('#fileList').value = ''; $('#fileList').click(); },
+  mergeList: () => mergeListSheet(),
   uploadLaser: b => { LASER_TARGET = { jobId: b.dataset.job, listId: b.dataset.list }; $('#fileLaser').value = ''; $('#fileLaser').click(); },
   pullSheets: async b => { const l = S.lists.find(x => x.id === b.dataset.list); if(l) await pullSheetsFromStock(l); render(); },
   printSheetOrder: b => { const l = S.lists.find(x => x.id === b.dataset.list); if(l) printSheetOrder(l); },
