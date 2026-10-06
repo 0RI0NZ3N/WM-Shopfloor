@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION = 'v22';
+const APP_VERSION = 'v23';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -1448,7 +1448,7 @@ function viewImport(){
 function newLine(src, n){
   const ln = { id: uid(), n: n, g: src.g || '', p: (src.p || '').trim(), q: String(src.q || '').trim(), d: (src.d || '').trim(), conf: src.conf == null ? 1 : src.conf,
     fieldRects: src.fieldRects || null, pageIndex: src.pageIndex == null ? null : src.pageIndex, st: {}, pkQty: '', pkInit: '', pkTs: null, qcInit: '', qcTs: null,
-    skid: '', boxId: '', boQty: '', boInit: '', boDate: '', note: '', shippedSpId: null, shippedAt: null };
+    skid: '', boxId: '', boQty: '', boInit: '', boDate: '', note: '', shipHistory: [] };
   return ln;
 }
 function applyFilled(ln, filled){
@@ -1631,40 +1631,78 @@ function doPrint(html, orientation){
   p.innerHTML = '<style>@page{size:letter ' + (orientation || 'landscape') + ';margin:.4in}</style>' + html.replace(/<div class="pr-h"><h1>/g, '<div class="pr-h"><h1><img class="pr-logo" src="icons/logo-dark.png" alt="Modern Elevator">');
   setTimeout(() => window.print(), 60);
 }
-// Which lines belong on a given shipment's packing slip: fully checked
-// off (every department signed + QC'd, nothing on back order - Model's
-// "done" status) and not already accounted for on an earlier shipment of
-// this same list. Once a slip is first printed for a shipment, the exact
-// set of lines it showed is frozen onto the shipment (sp.psLineIds) and
-// each of those lines is stamped shippedSpId/shippedAt - so a reprint
-// always shows the same lines (even after they're marked shipped, which
-// would otherwise make them disappear from the live "done & unshipped"
-// filter), and a later shipment for the same list (e.g. a B/O follow-up)
-// only picks up lines that have newly become done since.
+// Which lines belong on a given shipment's packing slip, and how much of
+// each. "Checked off" is Packaging + QC sign-off (pkInit/qcInit) - the
+// same floor-level gate the paper process already uses before something
+// goes on a truck - deliberately NOT the full department stamp set, so a
+// line doesn't need every department individually re-ticked here; it
+// needs to actually be packed and QC'd for what's shipping today.
+//
+// A line can ship across more than one shipment (e.g. 3 of 6 pieces now,
+// the other 3 once their back order clears), so each line keeps a
+// shipHistory[] log ({spId, qty, at}) rather than a single shipped flag.
+// "Shippable today" is: the back-order math if a formal back order qty is
+// set (qty - boQty), else the packaged qty (pkQty) if that's been entered
+// lower than the line qty, else the full line qty. Whatever's shippable
+// minus whatever's already been logged on an earlier shipment is what's
+// left to show - so a line reappears on a later shipment once more of it
+// becomes ready, instead of being excluded forever after its first slip.
+//
+// Once a slip is first printed for a shipment, the exact lines-and-qtys it
+// showed are frozen onto the shipment (sp.psLines) and logged into each
+// line's shipHistory - so a reprint always shows the same thing even as
+// the live state moves on, and deleting a shipment (see the "del" click
+// handler below) rolls its shipHistory entries back out so that quantity
+// becomes available to ship again.
+function shippedQtyFor(ln){
+  return (ln.shipHistory || []).reduce((a, h) => a + (parseFloat(h.qty) || 0), 0);
+}
+function shippableQtyFor(ln){
+  if(!(ln.pkInit && ln.qcInit)) return 0;
+  const q = parseFloat(ln.q) || 0, bo = parseFloat(ln.boQty) || 0, pk = parseFloat(ln.pkQty);
+  const total = bo > 0 ? Math.max(0, q - bo) : (!isNaN(pk) && pk > 0 && pk < q ? pk : q);
+  return Math.max(0, total - shippedQtyFor(ln));
+}
 function packingSlipItems(l, sp){
-  if(sp.psLineIds){
+  if(sp.psLines){
     const byId = new Map(l.items.map(ln => [ln.id, ln]));
-    return sp.psLineIds.map(id => byId.get(id)).filter(Boolean);
+    return sp.psLines.map(e => { const ln = byId.get(e.id); return ln ? Object.assign({}, ln, { _qtyShipped: e.qty, _bo: e.bo }) : null; }).filter(Boolean);
   }
-  return (l.items || []).filter(ln => Model.lineStatus(ln) === 'done' && !ln.shippedSpId);
+  return l.items.map(ln => {
+    const qty = shippableQtyFor(ln);
+    return qty > 0 ? Object.assign({}, ln, { _qtyShipped: qty, _bo: ln.boQty || '' }) : null;
+  }).filter(Boolean);
 }
 function markPackingSlipShipped(l, sp, items){
-  sp.psLineIds = items.map(ln => ln.id);
+  sp.psLines = items.map(ln => ({ id: ln.id, qty: ln._qtyShipped, bo: ln._bo }));
+  const byId = new Map(l.items.map(ln => [ln.id, ln]));
   const ts = nowIso();
-  for(const ln of items){ ln.shippedSpId = sp.id; ln.shippedAt = ts; }
+  for(const e of items){
+    const ln = byId.get(e.id); if(!ln) continue;
+    ln.shipHistory = ln.shipHistory || [];
+    ln.shipHistory.push({ spId: sp.id, qty: e._qtyShipped, at: ts });
+  }
+}
+// Undoes markPackingSlipShipped for a deleted shipment, so any quantity it
+// had logged as shipped becomes available to ship again.
+function unmarkPackingSlipShipped(l, sp){
+  for(const ln of l.items){
+    if(!Array.isArray(ln.shipHistory)) continue;
+    ln.shipHistory = ln.shipHistory.filter(h => h.spId !== sp.id);
+  }
 }
 // Builds the packing slip for one shipment (portrait, matching the paper
 // MEII packing slip pad) and sends it through the same print-to-PDF flow
 // as every other report - "Save as PDF" in the print dialog is how it
-// becomes a file to send out. Only lines that are fully checked off and
-// shipping on this shipment appear (see packingSlipItems above) - not
-// every line on the product list. Fields the app doesn't capture (Invoice
-// To address detail, per-line verification initials, print
-// name/signature) are left blank for hand fill, same as the rest of this
-// app's printed paperwork.
+// becomes a file to send out. Only lines that are packaged+QC'd and have
+// a shippable quantity appear (see packingSlipItems above) - not every
+// line on the product list, and not more of a line than is actually ready
+// today. Fields the app doesn't capture (Invoice To address detail,
+// per-line verification initials, print name/signature) are left blank
+// for hand fill, same as the rest of this app's printed paperwork.
 function packingSlipHtml(j, l, sp){
   const items = packingSlipItems(l, sp);
-  const qtyShipped = ln => ln.q || '';
+  const qtyShipped = ln => ln._qtyShipped != null ? ln._qtyShipped : (ln.q || '');
   return '<section class="ps">' +
     '<div class="ps-top">' +
     '<div class="ps-brand"><img class="ps-logo" src="icons/logo-dark.png" alt=""><div><div class="ps-co">MODERN ELEVATOR</div>' +
@@ -1680,7 +1718,7 @@ function packingSlipHtml(j, l, sp){
     '<tr><td>' + esc(sp.contactName || j.attn || '') + '</td><td>' + esc(sp.fob || '') + '</td><td>' + esc(sp.shipDate ? fmtDateLong(sp.shipDate) : '') + '</td><td>' + esc(sp.bookedCarrier || '') + '</td></tr></tbody></table>' +
     '<div class="ps-freight"><b>FREIGHT TERMS:</b> ' + esc(sp.freightTerms || '') + '</div>' +
     '<table class="ps-items"><thead><tr><th>Product #</th><th class="c">Qty</th><th>Description</th><th class="c">Qty Shipped</th><th>Verified By</th><th class="c">Qty B.O.</th></tr></thead><tbody>' +
-    (items.length ? items.map(ln => '<tr><td class="mono">' + esc(ln.p || '') + '</td><td class="c">' + esc(ln.q || '') + '</td><td>' + esc(ln.d || '') + '</td><td class="c">' + esc(qtyShipped(ln)) + '</td><td></td><td class="c">' + esc(ln.boQty || '') + '</td></tr>').join('') :
+    (items.length ? items.map(ln => '<tr><td class="mono">' + esc(ln.p || '') + '</td><td class="c">' + esc(ln.q || '') + '</td><td>' + esc(ln.d || '') + '</td><td class="c">' + esc(qtyShipped(ln)) + '</td><td></td><td class="c">' + esc(ln._bo || '') + '</td></tr>').join('') :
       '<tr><td colspan="6" class="c">No lines shipping on this slip</td></tr>') +
     '</tbody></table>' +
     '<div class="ps-bottom2"><label class="ps-check">' + (sp.customerPickup ? '☑' : '☐') + ' Customer Pickup</label><div>Print Name:</div><div>Signature:</div></div>' +
@@ -2000,6 +2038,7 @@ function editShipment(l, j, sp){
     } else if(b.dataset.g === 'back'){ drawShipList(l, j); }
     else if(b.dataset.g === 'del'){
       if(!(await confirmSheet('Delete this shipment?', 'Its RFQ log and booked info are lost.', 'Delete', true))) return;
+      unmarkPackingSlipShipped(l, sp);
       l.shipments = l.shipments.filter(x => x !== sp);
       await saveList(l);
       if(l.shipments.length) drawShipList(l, j); else { closeSheet(); render(); }

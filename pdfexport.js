@@ -228,7 +228,7 @@ const PdfExport = (() => {
     } else {
       for(const ln of items){
         cx = M;
-        const vals = { p: ln.p || '', q: ln.q || '', d: ln.d || '', qs: ln.q || '', vb: '', bo: ln.boQty || '' };
+        const vals = { p: ln.p || '', q: ln.q || '', d: ln.d || '', qs: (ln._qtyShipped != null ? ln._qtyShipped : ln.q) || '', vb: '', bo: ln._bo || '' };
         for(const c of cols){ box(cx, y, c.w, rowH); txt(fit(vals[c.key], font, 8, c.w - 6), cx + 3, y - 11, 8); cx += c.w; }
         y -= rowH;
       }
