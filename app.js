@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION='v24';
+const APP_VERSION='v25';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -500,7 +500,7 @@ function viewDash(){
     const ship = jobNextShip(j);
     const shipStats = jobShipStats(j);
     return '<div class="jcard" data-act="goJob" data-id="' + esc(j.id) + '"><span class="rank">#' + (i + 1) + '</span>' +
-      '<div><div class="jn">' + esc(j.jobNo) + (j.status === 'closed' ? ' <span class="tag">closed</span>' : '') + '</div><div class="muted">' + esc(j.jobName || '') + (j.customer ? ' · ' + esc(j.customer) : '') + '</div></div>' +
+      '<div><div class="jn">' + esc(j.jobNo) + (j.status === 'closed' ? ' <span class="tag">closed</span>' : '') + (j.stickerNo ? ' <span class="tag">sticker #' + esc(j.stickerNo) + '</span>' : '') + '</div><div class="muted">' + esc(j.jobName || '') + (j.customer ? ' · ' + esc(j.customer) : '') + '</div></div>' +
       '<div class="row"><span class="big">' + pct(s.pct) + '</span><span class="muted small">' + s.done + ' of ' + s.total + ' lines done</span></div>' +
       '<div class="bar"><i class="d" style="width:' + w(s.done) + '"></i><i class="p" style="width:' + w(s.partial) + '"></i><i class="b" style="width:' + w(s.bo) + '"></i></div>' +
       '<div class="lchips">' + s.lists.map(x => '<span class="lchip" style="background:' + gColor(x.list.groupKey) + ';color:' + gInk(x.list.groupKey) + '">' + esc(x.list.groupKey === 'X' ? x.list.title : x.list.groupKey) + (x.list.carNo ? ' · ' + esc(x.list.carNo) : '') + ' ' + pct(x.s.pct) + '</span>').join('') + (ship ? ' ' + shipBadge(ship) : '') +
@@ -516,6 +516,113 @@ function viewDash(){
 }
 
 /* ================= job view ================= */
+/* ---- skids: per-job sticker # + printable skid tags ----
+   j.stickerNo: the number on the little stickers put on this job's skids as
+   they come out of production (the loader grabs every skid with that number).
+   j.skids[]: {no, size, weight, packedAt} per skid #, keyed by the Skid # typed
+   on product list lines (ln.skid). A skid's contents are every line, across
+   the job's product lists, whose Skid # matches. */
+const SKID_SIZES = ['32" x 96"', '32" x 48"', '48" x 48"', '96" x 48"'];
+function skidQty(ln){
+  const q = parseFloat(ln.q) || 0, bo = parseFloat(ln.boQty) || 0, pk = parseFloat(ln.pkQty);
+  return bo > 0 ? Math.max(0, q - bo) : (!isNaN(pk) && pk > 0 && pk < q ? pk : q);
+}
+const fmtQ = q => String(Math.round(q * 100) / 100);
+function jobSkids(j){
+  const map = new Map();
+  for(const l of listsOf(j.id)) for(const ln of l.items){
+    const no = (ln.skid || '').trim().toUpperCase(); if(!no) continue;
+    if(!map.has(no)) map.set(no, { no, rows: [] });
+    map.get(no).rows.push({ ln, l });
+  }
+  return [...map.values()].sort((a, b) => a.no.localeCompare(b.no, undefined, { numeric: true }));
+}
+function skidContents(sk){
+  const m = new Map();
+  for(const { ln } of sk.rows){
+    const q = skidQty(ln); if(q <= 0) continue;
+    const key = (ln.p || '') + '|' + (ln.d || '');
+    if(m.has(key)) m.get(key).q += q; else m.set(key, { p: ln.p || '', d: ln.d || '', q });
+  }
+  return [...m.values()];
+}
+const skidRecRead = (j, no) => (j.skids || []).find(x => x.no === no) || {};
+function skidRecWrite(j, no){
+  j.skids = j.skids || [];
+  let r = j.skids.find(x => x.no === no);
+  if(!r){ r = { no, size: '', weight: '', packedAt: '' }; j.skids.push(r); }
+  return r;
+}
+const todayIso = () => new Date().toLocaleDateString('en-CA');
+const fmtMDY = iso => { const m = /^(\d{4})-(\d\d)-(\d\d)$/.exec(iso || ''); return m ? m[2] + '/' + m[3] + '/' + m[1] : (iso || ''); };
+function stickerClash(j){
+  const n = String(j.stickerNo || '').trim(); if(!n) return [];
+  return S.jobs.filter(x => x.id !== j.id && x.status !== 'closed' && String(x.stickerNo || '').trim() === n);
+}
+function viewSkids(j){
+  const sk = jobSkids(j), clash = stickerClash(j);
+  let h = '<div class="card"><h2>Skid sticker #</h2><p class="muted small">The number on the little stickers put on this job\'s skids as they come out of production. ' +
+    'Your loader grabs every skid with this number. It is printed big on every skid tag.</p>' +
+    '<div class="row"><input class="search" id="stickerNo" inputmode="numeric" maxlength="3" value="' + esc(j.stickerNo || '') + '" placeholder="1-10" aria-label="Skid sticker number" style="width:90px;min-width:90px;font-size:22px;text-align:center">' +
+    '<button class="btn dark" data-act="stickerSave">Save</button>' + (j.stickerNo ? '<button class="btn" data-act="stickerClear">Clear</button>' : '') + '</div>' +
+    '<div class="chips" style="margin-top:8px">' + Array.from({ length: 10 }, (_, i) => {
+      const n = String(i + 1), use = S.jobs.find(x => x.id !== j.id && x.status !== 'closed' && String(x.stickerNo || '').trim() === n);
+      return '<button class="chip' + (String(j.stickerNo || '') === n ? ' on' : '') + '" data-act="stickerPick" data-n="' + n + '">' + n + (use ? ' <span class="small muted">' + esc(use.jobNo) + '</span>' : '') + '</button>';
+    }).join('') + '</div>' +
+    (clash.length ? '<div class="note warn" style="margin-top:8px">Sticker <b>' + esc(j.stickerNo) + '</b> is also on active job ' + clash.map(x => '<b>' + esc(x.jobNo) + '</b>').join(', ') + '. The loader could grab the wrong skids.</div>' : '') + '</div>';
+  h += '<div class="row" style="margin:12px 0 6px"><h2 style="margin:0">Skids (' + sk.length + ')</h2><span class="sp"></span>' +
+    (sk.length ? '<button class="btn dark" data-act="skidPrintAll">Print all tags</button>' : '') + '</div>';
+  if(!sk.length) return h + '<div class="card empty"><p>No skid #s yet. Type a Skid # in the <b>Skid #</b> column on a product list line and that skid shows up here, ready to print a tag.</p></div>';
+  h += '<datalist id="skSizes">' + SKID_SIZES.map(z => '<option value="' + esc(z) + '">').join('') + '</datalist><div class="grid">';
+  for(const s of sk){
+    const rec = skidRecRead(j, s.no), rows = skidContents(s);
+    const cars = [...new Set(s.rows.map(r => String(r.l.carNo || '').trim()).filter(Boolean))];
+    h += '<div class="card"><div class="row"><b class="mono" style="font-size:20px">SKID ' + esc(s.no) + '</b><span class="sp"></span><button class="btn sm dark" data-act="skidPrint" data-no="' + esc(s.no) + '">Print tag</button></div>' +
+      '<p class="muted small" style="margin:4px 0 8px">' + rows.length + ' part' + (rows.length === 1 ? '' : 's') + ' · ' + fmtQ(rows.reduce((a, r) => a + r.q, 0)) + ' pcs' + (cars.length ? ' · ' + esc(cars.join(', ')) : '') + '</p>' +
+      '<div class="form"><div class="two"><label>Skid size<input data-sk="size" data-no="' + esc(s.no) + '" list="skSizes" value="' + esc(rec.size || '') + '" placeholder="32&quot; x 96&quot;"></label>' +
+      '<label>Skid weight<input data-sk="weight" data-no="' + esc(s.no) + '" value="' + esc(rec.weight || '') + '" placeholder="e.g. 450 kg"></label></div>' +
+      '<label>Date packed<input type="date" data-sk="packedAt" data-no="' + esc(s.no) + '" value="' + esc(rec.packedAt || '') + '"></label></div>' +
+      '<p class="small muted" style="margin-top:8px">' + (rows.slice(0, 6).map(r => esc(r.p || r.d) + ' ×' + fmtQ(r.q)).join(' · ') || 'Nothing packed on this skid yet') + (rows.length > 6 ? ' · +' + (rows.length - 6) + ' more' : '') + '</p></div>';
+  }
+  return h + '</div>';
+}
+function skidTagHtml(j, sk){
+  const rec = skidRecRead(j, sk.no), rows = skidContents(sk);
+  const cars = [...new Set(sk.rows.map(r => String(r.l.carNo || '').trim()).filter(Boolean))];
+  const total = rows.reduce((a, r) => a + r.q, 0);
+  const FIRST = 26, CONT = 50;
+  const pages = [rows.slice(0, FIRST)];
+  for(let i = FIRST; i < rows.length; i += CONT) pages.push(rows.slice(i, i + CONT));
+  const tier = n => n <= 8 ? 14 : n <= 13 ? 11.5 : n <= 19 ? 10 : n <= 26 ? 8.5 : n <= 38 ? 8 : 7;
+  const head = '<div class="sk-top"><img class="sk-logo" src="icons/logo-dark.png" alt="Modern Elevator"><div class="sk-sticker"><span>STICKER #</span><b>' + esc(j.stickerNo || '') + '</b></div></div>';
+  return pages.map((pg, i) => {
+    const last = i === pages.length - 1;
+    const tbl = '<table class="sk-items" style="font-size:' + tier(pg.length) + 'pt"><thead><tr><th>PART NAME:</th><th class="q">PART QTY:</th></tr></thead><tbody>' +
+      pg.map(r => '<tr><td>' + (r.p ? '<b class="mono">' + esc(r.p) + '</b> ' : '') + esc(r.d) + '</td><td class="q">' + esc(fmtQ(r.q)) + '</td></tr>').join('') +
+      (rows.length ? '' : '<tr><td>&nbsp;</td><td class="q"></td></tr>') + '</tbody></table>' +
+      (pages.length > 1 ? '<div class="sk-note">' + (last ? 'END OF LIST' : 'CONTINUED ON NEXT SHEET') + ' - sheet ' + (i + 1) + ' of ' + pages.length + '</div>' : '') +
+      (last ? '<div class="sk-total">' + rows.length + ' part' + (rows.length === 1 ? '' : 's') + ' · ' + esc(fmtQ(total)) + ' pcs on this skid</div>' : '');
+    if(i === 0) return '<section class="sk-page">' + head +
+      '<table class="sk-info"><tr><td class="l">JOB NAME &amp; No.</td><td><b>' + esc(j.jobNo) + '</b>' + (j.jobName ? '<div class="sub">' + esc(j.jobName) + '</div>' : '') + '</td></tr>' +
+      '<tr><td class="l">ELEVATOR #</td><td>' + esc(cars.join(', ')) + '</td></tr></table>' +
+      '<div class="sk-grow">' + tbl + '</div>' +
+      '<table class="sk-info"><tr><td class="l">SKID#</td><td><b>' + esc(sk.no) + '</b></td></tr>' +
+      '<tr><td class="l">SKID SIZE:</td><td>' + esc(rec.size || '') + '</td></tr>' +
+      '<tr><td class="l">SKID WEIGHT:</td><td>' + esc(rec.weight || '') + '</td></tr>' +
+      '<tr><td class="l">DATE PACKED:</td><td>' + esc(fmtMDY(rec.packedAt)) + '</td></tr></table></section>';
+    return '<section class="sk-page">' + head +
+      '<table class="sk-info"><tr><td class="l">JOB NAME &amp; No.</td><td><b>' + esc(j.jobNo) + '</b></td></tr><tr><td class="l">SKID#</td><td><b>' + esc(sk.no) + '</b> (contents continued)</td></tr></table>' +
+      '<div class="sk-grow">' + tbl + '</div></section>';
+  }).join('');
+}
+async function printSkidTags(nos){
+  const j = job(S.view.jobId), all = jobSkids(j);
+  const picked = all.filter(s => nos.includes(s.no)); if(!picked.length) return;
+  for(const s of picked){ const r = skidRecWrite(j, s.no); if(!r.packedAt) r.packedAt = todayIso(); }
+  await saveJob(j);
+  doPrint(picked.map(s => skidTagHtml(j, s)).join(''), 'portrait');
+}
+
 function viewJob(){
   const j = job(S.view.jobId), s = jobStats(j), ls = listsOf(j.id), laser = isLaser();
   // Cut lists work exactly like product lists - one per upload, its own
@@ -525,12 +632,12 @@ function viewJob(){
   const laserLists = laserListsOf(j.id);
   let sub = S.view.sub;
   const allIds = new Set([...ls.map(l => l.id), ...laserLists.map(l => l.id)]);
-  const validSubs = sub === 'material' || sub === 'info' || allIds.has(sub);
-  if(!validSubs || (laser && (sub === 'material' || sub === 'info'))) sub = S.view.sub = ls[0] ? ls[0].id : (laserLists[0] ? laserLists[0].id : null);
+  const validSubs = sub === 'material' || sub === 'info' || sub === 'skids' || allIds.has(sub);
+  if(!validSubs || (laser && (sub === 'material' || sub === 'info' || sub === 'skids'))) sub = S.view.sub = ls[0] ? ls[0].id : (laserLists[0] ? laserLists[0].id : null);
   const recs = receiptsForJob(j);
   let h = '<div class="card jhead"><div><div class="row"><h1 class="mono">' + esc(j.jobNo) + '</h1>' + (j.status === 'closed' ? '<span class="tag">closed</span>' : '') + '</div>' +
     '<div class="kv"><span>Job name</span><b>' + esc(j.jobName || '—') + '</b><span>Customer</span><b>' + esc(j.customer || '—') + '</b>' +
-    (j.shipAddr ? '<span>Ship to</span><b>' + esc(j.shipAddr).replace(/\n/g, ', ') + '</b>' : '') + '</div></div>' +
+    (j.shipAddr ? '<span>Ship to</span><b>' + esc(j.shipAddr).replace(/\n/g, ', ') + '</b>' : '') + (j.stickerNo ? '<span>Skid sticker #</span><b>' + esc(j.stickerNo) + '</b>' : '') + '</div></div>' +
     '<div class="jpct"><b>' + pct(s.pct) + '</b><div class="muted small">' + s.done + '/' + s.total + ' lines done · ' + s.bo + ' on B/O' + (jobNextShip(j) ? ' · next ship ' + esc(fmtDateLong(jobNextShip(j))) + ' ' + shipBadge(jobNextShip(j)) : '') + '</div>' +
     (laser ? '' : '<div class="row" style="justify-content:flex-end;margin-top:8px">' +
     (jobShipStats(j).total ? '<button class="btn sm" data-act="jobShipments" data-id="' + esc(j.id) + '">Shipments (' + jobShipStats(j).shipped + '/' + jobShipStats(j).total + ' shipped)</button>' : '') +
@@ -541,13 +648,14 @@ function viewJob(){
       esc(l.title || 'PRODUCT LIST') + (l.carNo ? ' · CAR ' + esc(l.carNo) : '') + ' <span class="muted mono">' + pct(st.pct) + '</span></button>';
   }).join('') +
     (laser ? '' : '<button class="subtab' + (sub === 'material' ? ' on' : '') + '" data-act="sub" data-k="material">Material (' + recs.length + (s.unmatched ? ' · ' + s.unmatched + ' unmatched' : '') + ')</button>') +
+    (laser ? '' : '<button class="subtab' + (sub === 'skids' ? ' on' : '') + '" data-act="sub" data-k="skids">Skids (' + jobSkids(j).length + ')' + (j.stickerNo ? ' · #' + esc(j.stickerNo) : '') + '</button>') +
     laserLists.map(l => '<button class="subtab' + (sub === l.id ? ' on' : '') + '" data-act="sub" data-k="' + l.id + '"><span class="sw" style="background:' + gColor('LASER') + '"></span>' +
       esc(l.title || 'LASER CUT LIST') + ' <span class="muted mono">' + l.items.length + ' pcs</span></button>').join('') +
     '</div><div class="subtabActions">' +
     (laser ? '' : '<button class="subtab addbtn" data-act="importList" data-job="' + esc(j.id) + '">+ Add list</button>') +
     '<button class="subtab addbtn" data-act="uploadLaser" data-job="' + esc(j.id) + '">+ Add cut list</button></div></div>';
   const curLaser = laserLists.find(l => l.id === sub);
-  h += '<div class="panel">' + (sub === 'material' ? viewMaterial(j, recs) : curLaser ? viewLaserList(j, curLaser) : viewList(j, S.lists.find(l => l.id === sub), laser)) + '</div>';
+  h += '<div class="panel">' + (sub === 'material' ? viewMaterial(j, recs) : sub === 'skids' ? viewSkids(j) : curLaser ? viewLaserList(j, curLaser) : viewList(j, S.lists.find(l => l.id === sub), laser)) + '</div>';
   return h;
 }
 
@@ -2389,6 +2497,15 @@ const A = {
   lfilter: b => { S.ui.listFilter[S.view.sub] = b.dataset.k; render(); },
   importList: b => { IMP_TARGET = { jobId: b.dataset.job, listId: b.dataset.list, append: !!b.dataset.append }; $('#fileList').value = ''; $('#fileList').click(); },
   mergeList: () => mergeListSheet(),
+  stickerSave: async () => {
+    const j = job(S.view.jobId), v = ($('#stickerNo').value || '').trim();
+    if(v && !/^\d{1,3}$/.test(v)) return toast('Enter the sticker number, e.g. 4', true);
+    j.stickerNo = v; await saveJob(j); render(); toast(v ? 'Sticker # ' + v + ' saved' : 'Sticker # cleared');
+  },
+  stickerPick: async b => { const j = job(S.view.jobId); j.stickerNo = b.dataset.n; await saveJob(j); render(); },
+  stickerClear: async () => { const j = job(S.view.jobId); j.stickerNo = ''; await saveJob(j); render(); },
+  skidPrint: b => printSkidTags([b.dataset.no]),
+  skidPrintAll: () => printSkidTags(jobSkids(job(S.view.jobId)).map(s => s.no)),
   uploadLaser: b => { LASER_TARGET = { jobId: b.dataset.job, listId: b.dataset.list }; $('#fileLaser').value = ''; $('#fileLaser').click(); },
   pullSheets: async b => { const l = S.lists.find(x => x.id === b.dataset.list); if(l) await pullSheetsFromStock(l); render(); },
   printSheetOrder: b => { const l = S.lists.find(x => x.id === b.dataset.list); if(l) printSheetOrder(l); },
@@ -2533,6 +2650,9 @@ document.addEventListener('change', async e => {
     else ln[k] = k === 'skid' ? v.toUpperCase() : v;
     await saveList(l);
     setTimeout(() => refreshRow(l, ln.id), 40);
+  } else if(t.dataset.sk){
+    const j = job(S.view.jobId); if(!j) return;
+    skidRecWrite(j, t.dataset.no)[t.dataset.sk] = t.value.trim(); await saveJob(j);
   } else if(t.dataset.df){
     const l = S.lists.find(x => x.id === $('#drawer').dataset.list), ln = l.items.find(x => x.id === $('#drawer').dataset.line);
     const k = t.dataset.df;
