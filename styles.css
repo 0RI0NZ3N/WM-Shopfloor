@@ -281,9 +281,9 @@ table.rev tr.low td{background:var(--warnfill)}
   .sk-page:last-child{page-break-after:auto;break-after:auto}
   .sk-top{display:flex;align-items:center;justify-content:space-between;padding-bottom:8px}
   .sk-logo{height:.6in;width:auto}
-  .sk-sticker{border:3px solid #000;min-width:1.3in;text-align:center;padding:2px 10px}
-  .sk-sticker span{display:block;font:700 9pt Arial,sans-serif}
-  .sk-sticker b{display:block;font:700 40pt/1.05 Arial,sans-serif;min-height:.5in}
+  .sk-qr{text-align:center}
+  .sk-qr svg{display:block;width:1.15in;height:1.15in;margin:0 auto}
+  .sk-qr span{display:block;font:700 6.5pt Arial,sans-serif;margin-top:2px}
   #print table.sk-info,#print table.sk-items{width:100%;border-collapse:collapse;margin:0}
   #print table.sk-info td{border:1px solid #000;font-size:15pt;text-align:center;padding:7px 8px}
   #print table.sk-info td.l{width:42%}

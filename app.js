@@ -5,7 +5,7 @@
 // Bump this together with VERSION in sw.js on every deploy. Shown in the
 // header so it's visible at a glance whether a tablet has picked up the
 // latest push, without digging into browser dev tools.
-const APP_VERSION='v25';
+const APP_VERSION='v26';
 
 /* ================= model helpers ================= */
 const Model = (() => {
@@ -476,6 +476,7 @@ function viewDash(){
     '</div><span class="sp"></span>' +
     '<input class="search" placeholder="Search job #, name, customer" value="' + esc(S.ui.dashQ) + '" data-in="dashQ">' +
     (isLaser() ? '' :
+      '<button class="btn" data-act="scanLabel">Scan label</button>' +
       '<button class="btn" data-act="printPackaging">Packaging report</button>' +
       '<button class="btn" data-act="printAll" data-detail="0">Print summary</button>' +
       '<button class="btn" data-act="printAll" data-detail="1">Print full report</button>' +
@@ -562,7 +563,7 @@ function stickerClash(j){
 function viewSkids(j){
   const sk = jobSkids(j), clash = stickerClash(j);
   let h = '<div class="card"><h2>Skid sticker #</h2><p class="muted small">The number on the little stickers put on this job\'s skids as they come out of production. ' +
-    'Your loader grabs every skid with this number. It is printed big on every skid tag.</p>' +
+    'Your loader grabs every skid with this number. For reference only - it is not printed on the skid tag.</p>' +
     '<div class="row"><input class="search" id="stickerNo" inputmode="numeric" maxlength="3" value="' + esc(j.stickerNo || '') + '" placeholder="1-10" aria-label="Skid sticker number" style="width:90px;min-width:90px;font-size:22px;text-align:center">' +
     '<button class="btn dark" data-act="stickerSave">Save</button>' + (j.stickerNo ? '<button class="btn" data-act="stickerClear">Clear</button>' : '') + '</div>' +
     '<div class="chips" style="margin-top:8px">' + Array.from({ length: 10 }, (_, i) => {
@@ -571,7 +572,7 @@ function viewSkids(j){
     }).join('') + '</div>' +
     (clash.length ? '<div class="note warn" style="margin-top:8px">Sticker <b>' + esc(j.stickerNo) + '</b> is also on active job ' + clash.map(x => '<b>' + esc(x.jobNo) + '</b>').join(', ') + '. The loader could grab the wrong skids.</div>' : '') + '</div>';
   h += '<div class="row" style="margin:12px 0 6px"><h2 style="margin:0">Skids (' + sk.length + ')</h2><span class="sp"></span>' +
-    (sk.length ? '<button class="btn dark" data-act="skidPrintAll">Print all tags</button>' : '') + '</div>';
+    '<button class="btn" data-act="scanLabel">Scan tag</button>' + (sk.length ? '<button class="btn dark" data-act="skidPrintAll">Print all tags</button>' : '') + '</div>';
   if(!sk.length) return h + '<div class="card empty"><p>No skid #s yet. Type a Skid # in the <b>Skid #</b> column on a product list line and that skid shows up here, ready to print a tag.</p></div>';
   h += '<datalist id="skSizes">' + SKID_SIZES.map(z => '<option value="' + esc(z) + '">').join('') + '</datalist><div class="grid">';
   for(const s of sk){
@@ -594,7 +595,7 @@ function skidTagHtml(j, sk){
   const pages = [rows.slice(0, FIRST)];
   for(let i = FIRST; i < rows.length; i += CONT) pages.push(rows.slice(i, i + CONT));
   const tier = n => n <= 8 ? 14 : n <= 13 ? 11.5 : n <= 19 ? 10 : n <= 26 ? 8.5 : n <= 38 ? 8 : 7;
-  const head = '<div class="sk-top"><img class="sk-logo" src="icons/logo-dark.png" alt="Modern Elevator"><div class="sk-sticker"><span>STICKER #</span><b>' + esc(j.stickerNo || '') + '</b></div></div>';
+  const head = '<div class="sk-top"><img class="sk-logo" src="icons/logo-dark.png" alt="Modern Elevator"><div class="sk-qr">' + Zebra.qrSvg(JSON.stringify({ k: 'skid', j: j.jobNo, s: sk.no }), 200) + '<span>SCAN FOR CONTENTS</span></div></div>';
   return pages.map((pg, i) => {
     const last = i === pages.length - 1;
     const tbl = '<table class="sk-items" style="font-size:' + tier(pg.length) + 'pt"><thead><tr><th>PART NAME:</th><th class="q">PART QTY:</th></tr></thead><tbody>' +
@@ -1373,11 +1374,40 @@ async function takePhoto(file){
   c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
   return c.toDataURL('image/jpeg', 0.72);
 }
+// What a scanned QR means: a skid tag opens that skid's contents; anything
+// else is treated as a receiving label.
+function handleScanned(raw){
+  let obj = null; try{ obj = JSON.parse(raw); }catch(e){}
+  if(obj && obj.k === 'skid') return openSkidFromScan(obj);
+  const cd = (obj && obj.c) || raw;
+  const r = S.receipts.find(x => x.code === cd || x.moveCode === cd);
+  if(r) editRec(r); else toast('Label ' + cd + ' is not in this tablet’s receiving log', true);
+}
+function openSkidFromScan(o){
+  const j = S.jobs.find(x => String(x.jobNo).toUpperCase() === String(o.j || '').toUpperCase());
+  if(!j) return toast('Job ' + (o.j || '?') + ' is not on this tablet', true);
+  const no = String(o.s || '').trim().toUpperCase();
+  const sk = jobSkids(j).find(x => x.no === no);
+  if(!sk) return toast('Skid ' + no + ' is not on job ' + j.jobNo + ' on this tablet', true);
+  const rec = skidRecRead(j, sk.no), rows = skidContents(sk);
+  const cars = [...new Set(sk.rows.map(r => String(r.l.carNo || '').trim()).filter(Boolean))];
+  go({ name: 'job', jobId: j.id, sub: 'skids' });
+  openSheet('<h2>Skid ' + esc(sk.no) + ' · ' + esc(j.jobNo) + '</h2><p class="muted small">' + esc(j.jobName || '') + (cars.length ? ' · ' + esc(cars.join(', ')) : '') + '</p>' +
+    '<div class="kv small" style="margin:6px 0">' + [['Size', rec.size], ['Weight', rec.weight], ['Packed', fmtMDY(rec.packedAt)]].map(([k, v]) => '<span class="muted">' + k + ' </span><b>' + esc(v || '—') + '</b>').join(' &nbsp; ') + '</div>' +
+    '<table class="rev" style="width:100%"><thead><tr><th>Part #</th><th>Description</th><th class="c">Qty</th></tr></thead><tbody>' +
+    (rows.map(r => '<tr><td class="mono">' + esc(r.p) + '</td><td>' + esc(r.d) + '</td><td class="c"><b>' + esc(fmtQ(r.q)) + '</b></td></tr>').join('') || '<tr><td colspan="3" class="muted">Nothing packed on this skid yet</td></tr>') + '</tbody></table>' +
+    '<p class="small muted" style="margin-top:6px">' + rows.length + ' part' + (rows.length === 1 ? '' : 's') + ' · ' + esc(fmtQ(rows.reduce((a, r) => a + r.q, 0))) + ' pcs</p>' +
+    '<div class="row" style="margin-top:10px"><button class="btn" data-sc="print">Print tag</button><span class="sp"></span><button class="btn dark" data-sc="x">Close</button></div>');
+  $('#sheet').onclick = e => {
+    const b = e.target.closest('[data-sc]'); if(!b) return;
+    closeSheet(); if(b.dataset.sc === 'print') printSkidTags([sk.no]);
+  };
+}
 async function scanLabel(){
   let stream;
   try{ stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }); }
   catch(e){ return toast('Camera not available: ' + e.message, true); }
-  openSheet('<h2>Scan a receiving label</h2><video id="scanv" playsinline muted style="width:100%;max-height:60vh;background:#000;border-radius:8px"></video><div class="row" style="margin-top:10px"><span class="sp"></span><button class="btn" data-s="x">Cancel</button></div>');
+  openSheet('<h2>Scan a label</h2><video id="scanv" playsinline muted style="width:100%;max-height:60vh;background:#000;border-radius:8px"></video><div class="row" style="margin-top:10px"><span class="sp"></span><button class="btn" data-s="x">Cancel</button></div>');
   const v = $('#scanv'); v.srcObject = stream; await v.play();
   // Decoded with jsQR (pure JS, works in any browser) rather than the native
   // BarcodeDetector API, which Samsung Internet and most non-desktop-Chrome
@@ -1396,11 +1426,8 @@ async function scanLabel(){
       let code = null;
       try{ code = jsQR(ctx.getImageData(0, 0, c.width, c.height).data, c.width, c.height); }catch(e){}
       if(code && code.data){
-        const raw = code.data;
-        let cd = raw; try{ cd = JSON.parse(raw).c || raw; }catch(e){}
-        const r = S.receipts.find(x => x.code === cd || x.moveCode === cd);
         stop(); closeSheet();
-        if(r) editRec(r); else toast('Label ' + cd + ' is not in this tablet’s receiving log', true);
+        handleScanned(code.data);
         return;
       }
     }
